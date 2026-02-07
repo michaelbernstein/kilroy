@@ -466,11 +466,18 @@ git:
 llm:
   providers:
 YAML
-  # Configure all supported providers so engine-level failover can work when API keys are present.
-  # This does not change the DOT contract: the graph still selects the primary provider/model.
-  echo "NOTE: benchmark run config includes failover-capable providers: openai, anthropic, google"
+  # By default, configure ONLY the providers referenced by the graph (no implicit substitutions).
+  # If you want engine-level API failover, opt in to including all providers.
+  local include_all="${KILROY_BENCH_INCLUDE_ALL_PROVIDERS:-0}"
+  if [[ "$include_all" == "1" ]]; then
+    echo "NOTE: benchmark run config includes failover-capable providers: openai, anthropic, google"
+    providers=$'openai\nanthropic\ngoogle'
+  else
+    echo "NOTE: benchmark run config includes only providers referenced in the graph (strict mode)"
+  fi
   local backend_default="${KILROY_BENCH_BACKEND_DEFAULT:-api}"
-  for p in openai anthropic google; do
+  while read -r p; do
+    [[ -z "$p" ]] && continue
     local backend="$backend_default"
     case "$p" in
       openai) backend="${KILROY_BENCH_BACKEND_OPENAI:-$backend}" ;;
@@ -481,7 +488,7 @@ YAML
     $p:
       backend: $backend
 YAML
-  done
+  done <<< "$providers"
 
   local run_id="bench-$name-$STAMP"
   local logs_root="$workdir/logs"
@@ -492,8 +499,8 @@ YAML
   echo "run_id=$run_id"
   echo "logs_root=$logs_root"
 
-  # Guard against hangs: per-node timeout is enforced by the engine, and we also apply an overall per-run timeout.
-  local run_timeout="${KILROY_BENCH_RUN_TIMEOUT:-2h}"
+  # Optional: overall per-run timeout (defaults to none; CLI runs may take hours).
+  local run_timeout="${KILROY_BENCH_RUN_TIMEOUT:-0}"
   set +e
   if [[ "$run_timeout" == "0" ]]; then
     ./kilroy attractor run --graph "$graph" --config "$cfg" --run-id "$run_id" --logs-root "$logs_root" | tee "$workdir/run.out"

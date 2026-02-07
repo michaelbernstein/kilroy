@@ -6,10 +6,7 @@ digraph solitaire {
         retry_target="impl_setup",
         fallback_retry_target="impl_game_logic",
         model_stylesheet="
-            * { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: medium; }
-            .hard { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: high; }
-            .verify { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: medium; }
-            .review { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: high; }
+            * { llm_model: gemini-3-flash-preview; llm_provider: google; }
         "
     ]
 
@@ -19,7 +16,6 @@ digraph solitaire {
     // Spec expansion - bootstraps .ai/spec.md into existence
     expand_spec [
         shape=box,
-        timeout=600,
         auto_status=true,
         prompt="Given the requirements: Build a terminal-based solitaire game (Klondike variant). The game should display cards using ASCII art, support standard solitaire rules (7 tableau piles, 4 foundation piles, stock and waste), allow keyboard-based moves, detect win/loss conditions, and provide a pleasant terminal UI with clear instructions.
 
@@ -40,7 +36,6 @@ Write status.json: outcome=success"
     // Project setup
     impl_setup [
         shape=box,
-        timeout=600,
         prompt="Goal: $goal
 
 Read .ai/spec.md. Set up the project structure based on the chosen language:
@@ -61,7 +56,6 @@ Write status.json: outcome=success if project structure is created and builds, o
     verify_setup [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify project setup was completed correctly.
 
 Run:
@@ -82,7 +76,6 @@ Write status.json: outcome=success if ALL checks pass, outcome=fail with failure
     // Core data structures
     impl_data_structures [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read .ai/spec.md for the data structure design.
@@ -106,7 +99,6 @@ Write status.json: outcome=success if all tests pass, outcome=fail with failure_
     verify_data_structures [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify data structures implementation.
 
 Run:
@@ -131,7 +123,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     impl_game_logic [
         shape=box,
         class="hard",
-        timeout=1200,
         max_retries=2,
         prompt="Goal: $goal
 
@@ -161,7 +152,6 @@ Write status.json: outcome=success if all tests pass, outcome=fail with failure_
     verify_game_logic [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify game logic implementation.
 
 Run:
@@ -187,7 +177,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     impl_terminal_ui [
         shape=box,
         class="hard",
-        timeout=1200,
         max_retries=2,
         prompt="Goal: $goal
 
@@ -220,7 +209,6 @@ Write status.json: outcome=success if builds and tests pass, outcome=fail with f
     verify_terminal_ui [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify terminal UI implementation.
 
 Run:
@@ -245,7 +233,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     // Integration and polish
     impl_integration [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read .ai/spec.md for complete requirements.
@@ -275,7 +262,6 @@ Write status.json: outcome=success if game runs and all tests pass, outcome=fail
     verify_integration [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify integration is complete.
 
 Run:
@@ -301,7 +287,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     review [
         shape=box,
         class="review",
-        timeout=600,
         goal_gate=true,
         prompt="Goal: $goal
 

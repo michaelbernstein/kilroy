@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/strongdm/kilroy/internal/attractor/engine"
 )
@@ -113,8 +112,8 @@ func attractorRun(args []string) {
 		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
-	defer cancel()
+	// Default: no deadline. CLI runs (especially with provider CLIs) can take hours.
+	ctx := context.Background()
 
 	res, err := engine.RunWithConfig(ctx, dotSource, cfg, engine.RunOptions{
 		RunID:    runID,
@@ -231,8 +230,8 @@ func attractorResume(args []string) {
 		usage()
 		os.Exit(1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
-	defer cancel()
+	// Default: no deadline. Resume may replay long stages or rehydrate large artifacts.
+	ctx := context.Background()
 	var (
 		res *engine.Result
 		err error

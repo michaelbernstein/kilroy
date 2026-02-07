@@ -784,7 +784,8 @@ func defaultCLIInvocation(provider string, modelID string, worktreeDir string) (
 		args = []string{"-p", "--output-format", "stream-json", "--model", modelID}
 	case "google":
 		exe = envOr("KILROY_GEMINI_PATH", "gemini")
-		args = []string{"-p", "--output-format", "stream-json", "--model", modelID}
+		// Metaspec: CLI adapters must be non-interactive. Gemini CLI supports this via --yolo / --approval-mode.
+		args = []string{"-p", "--output-format", "stream-json", "--yolo", "--model", modelID}
 	default:
 		return "", nil
 	}
