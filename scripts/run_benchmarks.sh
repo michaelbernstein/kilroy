@@ -195,7 +195,7 @@ run_one() {
       exit 1
     fi
     echo "WARNING: overriding model_stylesheet from file: ${KILROY_BENCH_MODEL_STYLESHEET_FILE}"
-    python3 - "$graph" "${KILROY_BENCH_MODEL_STYLESHEET_FILE}" <<'PY'
+    python3 - "$graph" "${KILROY_BENCH_MODEL_STYLESHEET_FILE}" <<'PY' || return 1
 import pathlib, re, sys
 graph_path = pathlib.Path(sys.argv[1])
 stylesheet_path = pathlib.Path(sys.argv[2])
@@ -221,21 +221,26 @@ PY
     verify_model="${KILROY_BENCH_OVERRIDE_MODEL_VERIFY:-gpt-5.2-mini}"
     review_model="${KILROY_BENCH_OVERRIDE_MODEL_REVIEW:-$hard_model}"
     echo "WARNING: overriding model_stylesheet preset: provider=openai base=$base_model hard=$hard_model verify=$verify_model review=$review_model"
-    python3 - "$graph" "$base_model" "$hard_model" "$verify_model" "$review_model" <<'PY'
+    python3 - "$graph" "$base_model" "$hard_model" "$verify_model" "$review_model" <<'PY' || return 1
 import pathlib, re, sys
 graph_path = pathlib.Path(sys.argv[1])
 base_model, hard_model, verify_model, review_model = sys.argv[2:6]
 src = graph_path.read_text()
 
-stylesheet = f\"\"\"\n* {{ llm_model: {base_model}; llm_provider: openai; reasoning_effort: medium; }}\n.hard {{ llm_model: {hard_model}; llm_provider: openai; reasoning_effort: high; }}\n.verify {{ llm_model: {verify_model}; llm_provider: openai; reasoning_effort: medium; }}\n.review {{ llm_model: {review_model}; llm_provider: openai; reasoning_effort: high; }}\n\"\"\".strip()
+stylesheet = f"""
+* {{ llm_model: {base_model}; llm_provider: openai; reasoning_effort: medium; }}
+.hard {{ llm_model: {hard_model}; llm_provider: openai; reasoning_effort: high; }}
+.verify {{ llm_model: {verify_model}; llm_provider: openai; reasoning_effort: medium; }}
+.review {{ llm_model: {review_model}; llm_provider: openai; reasoning_effort: high; }}
+""".strip()
 
 lines = [ln.strip() for ln in stylesheet.splitlines() if ln.strip()]
-indented = \"\\n\".join(\"            \" + ln for ln in lines)
-replacement = 'model_stylesheet=\"\\\\n' + indented + '\\\\n        \"'
+indented = "\n".join("            " + ln for ln in lines)
+replacement = 'model_stylesheet="\\n' + indented + '\\n        "'
 
 out, n = re.subn(r'model_stylesheet\s*=\s*".*?"', replacement, src, count=1, flags=re.S)
 if n != 1:
-    raise SystemExit(f\"expected to replace exactly 1 model_stylesheet, replaced {n}\")
+    raise SystemExit(f"expected to replace exactly 1 model_stylesheet, replaced {n}")
 graph_path.write_text(out)
 PY
   else
@@ -261,7 +266,7 @@ for m in re.finditer(r'llm_provider\s*:\s*([a-zA-Z0-9_-]+)\s*;', txt):
 for p in sorted(providers):
     print(p)
 PY
-)"
+)" || return 1
 
   local cfg="$workdir/run.yaml"
   cat > "$cfg" <<YAML
