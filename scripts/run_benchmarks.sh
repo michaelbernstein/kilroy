@@ -216,7 +216,7 @@ PY
       echo "KILROY_BENCH_OVERRIDE_PROVIDER is set to an unsupported value: ${KILROY_BENCH_OVERRIDE_PROVIDER} (supported: openai)" >&2
       exit 1
     fi
-    base_model="${KILROY_BENCH_OVERRIDE_MODEL_BASE:-gpt-5.2}"
+    base_model="${KILROY_BENCH_OVERRIDE_MODEL_BASE:-gpt-5.3-codex}"
     hard_model="${KILROY_BENCH_OVERRIDE_MODEL_HARD:-$base_model}"
     verify_model="${KILROY_BENCH_OVERRIDE_MODEL_VERIFY:-$base_model}"
     review_model="${KILROY_BENCH_OVERRIDE_MODEL_REVIEW:-$hard_model}"

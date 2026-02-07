@@ -6,10 +6,10 @@ digraph solitaire {
         retry_target="impl_setup",
         fallback_retry_target="impl_game_logic",
         model_stylesheet="
-            * { llm_model: claude-sonnet-4-5; llm_provider: anthropic; }
-            .hard { llm_model: claude-opus-4-6; llm_provider: anthropic; }
-            .verify { llm_model: claude-sonnet-4-5; llm_provider: anthropic; reasoning_effort: medium; }
-            .review { llm_model: claude-opus-4-6; llm_provider: anthropic; reasoning_effort: high; }
+            * { llm_model: gpt-5.3-codex; llm_provider: openai; reasoning_effort: medium; }
+            .hard { llm_model: gpt-5.3-codex; llm_provider: openai; reasoning_effort: high; }
+            .verify { llm_model: gpt-5.3-codex; llm_provider: openai; reasoning_effort: medium; }
+            .review { llm_model: gpt-5.3-codex; llm_provider: openai; reasoning_effort: high; }
         "
     ]
 
