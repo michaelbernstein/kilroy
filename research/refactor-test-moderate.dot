@@ -6,10 +6,10 @@ digraph linkcheck {
         retry_target="impl_setup",
         fallback_retry_target="impl_crawler",
         model_stylesheet="
-            * { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: medium; }
-            .hard { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: high; }
-            .verify { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: medium; }
-            .review { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: high; }
+            * { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: medium; }
+            .hard { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: high; }
+            .verify { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: medium; }
+            .review { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: high; }
         "
     ]
 
@@ -19,7 +19,6 @@ digraph linkcheck {
     // Spec expansion (vague input — bootstraps .ai/spec.md into existence)
     expand_spec [
         shape=box,
-        timeout=600,
         auto_status=true,
         prompt="Given the requirements: Build a Go CLI tool called 'linkcheck' that takes a URL as input, crawls the page, finds all links, checks each link for HTTP status, and outputs a report of broken links (4xx/5xx). It should respect robots.txt, have a configurable crawl depth (default 1), and output in both human-readable and JSON formats.
 
@@ -44,7 +43,6 @@ Write status.json: outcome=success"
     // Project setup
     impl_setup [
         shape=box,
-        timeout=600,
         prompt="Goal: $goal
 
 Read .ai/spec.md. Create the Go project structure:
@@ -64,7 +62,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_setup [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify project setup was completed correctly.
 
 Run:
@@ -84,7 +81,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     impl_crawler [
         shape=box,
         class="hard",
-        timeout=1200,
         max_retries=2,
         prompt="Goal: $goal
 
@@ -114,7 +110,6 @@ Write status.json: outcome=success if all criteria pass, outcome=fail with failu
     verify_crawler [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify crawler implementation was completed correctly.
 
 Run:
@@ -133,7 +128,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Robots.txt implementation
     impl_robots [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Spec: .ai/spec.md, robots.txt section.
@@ -160,7 +154,6 @@ Write status.json: outcome=success if all criteria pass, outcome=fail with failu
     verify_robots [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify robots.txt implementation was completed correctly.
 
 Run:
@@ -179,7 +172,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     impl_checker [
         shape=box,
         class="hard",
-        timeout=1200,
         max_retries=2,
         prompt="Goal: $goal
 
@@ -208,7 +200,6 @@ Write status.json: outcome=success if all criteria pass, outcome=fail with failu
     verify_checker [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify link checker implementation was completed correctly.
 
 Run:
@@ -226,7 +217,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Output formatter implementation
     impl_formatter [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Spec: .ai/spec.md, output section.
@@ -254,7 +244,6 @@ Write status.json: outcome=success if all criteria pass, outcome=fail with failu
     verify_formatter [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify formatter implementation was completed correctly.
 
 Run:
@@ -272,7 +261,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // CLI integration
     impl_cli [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Spec: .ai/spec.md, CLI section.
@@ -296,7 +284,6 @@ Write status.json: outcome=success if all criteria pass, outcome=fail with failu
     verify_cli [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify CLI integration was completed correctly.
 
 Run:
@@ -314,7 +301,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Integration test
     impl_integration [
         shape=box,
-        timeout=1200,
         goal_gate=true,
         prompt="Goal: $goal
 
@@ -338,7 +324,6 @@ Write status.json: outcome=success if all criteria pass, outcome=fail with failu
     verify_integration [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify integration test was completed correctly.
 
 Run:
@@ -356,7 +341,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     review [
         shape=box,
         class="review",
-        timeout=600,
         goal_gate=true,
         prompt="Goal: $goal
 

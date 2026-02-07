@@ -17,11 +17,76 @@ Take English requirements of any size and produce a valid `.dot` pipeline file t
 
 When invoked programmatically (via CLI), output ONLY the raw `.dot` file content. No markdown fences, no explanatory text before or after the digraph. The output must start with `digraph` and end with the closing `}`.
 
+**Exception (programmatic disambiguation):** If you cannot confidently generate a correct `.dot` file because the user's request is ambiguous in a load-bearing way (identity/meaning) and you cannot ask questions (CLI ingest), output a short clarification request and STOP. In this exception case, do NOT output any `digraph` at all. Start the output with `NEEDS_CLARIFICATION` and include exactly one disambiguation question plus 2-5 concrete options anchored by repo evidence (paths/names).
+
 When invoked interactively (in conversation), you may include explanatory text.
 
 ## Process
 
-### Phase 0: Pick Models + Executors + Parallelism + Thinking (Before Writing Any DOT)
+### Phase 0A: Repo Scan + Minimal Disambiguation (Ask 0 Questions If Possible)
+
+This phase exists to prevent building the wrong thing when the user's wording can reasonably refer to multiple distinct targets.
+
+Rules:
+- Prefer **zero** clarification questions.
+- Ask ONLY **disambiguation** questions (identity/meaning). Do NOT ask preference questions (language, framework, style, etc.).
+- Before asking anything, do a quick repo scan/search to try to resolve ambiguity from evidence.
+- Ask the **minimum** number of disambiguation questions required to proceed confidently (typically 1).
+
+What counts as a disambiguation question:
+- Resolve an ambiguous identifier that could map to multiple real things.
+  - Example: "jj" could mean multiple tools; "parser" could refer to multiple packages; "api" could refer to multiple services.
+
+What does NOT count as disambiguation:
+- "What language should I code in?"
+- "Should we use framework X or Y?"
+
+#### Step 0A.1: Extract Ambiguous Tokens
+
+From the user request, list candidate ambiguous references:
+- Short names/acronyms
+- Tool/binary names
+- Bare filenames without paths
+- Component names that might exist multiple times in a monorepo
+
+#### Step 0A.2: Quick Repo Triage (Evidence First)
+
+Timebox to ~60 seconds. Use local inspection to resolve meaning:
+- List top-level structure (`ls`)
+- Search likely entrypoints/docs (`README*`, `docs/`, `cmd/`, `scripts/`, `internal/`)
+- Use ripgrep (`rg`) for each ambiguous token and inspect the most relevant hits
+
+If a single referent is strongly supported by repo evidence, proceed without questions.
+
+#### Step 0A.3: If Still Ambiguous, Ask ONE Disambiguation Question (Interactive)
+
+Interactive mode (conversation):
+- Ask exactly one SINGLE-SELECT disambiguation question.
+- Provide 2-5 options, each anchored by concrete repo evidence (paths/names).
+- Do NOT generate any `.dot` until the user answers.
+
+#### Step 0A.4: If Still Ambiguous, Stop and Request Disambiguation (Programmatic)
+
+Programmatic mode (CLI ingest / cannot ask):
+- If ambiguity is load-bearing after repo triage, you MUST NOT emit any `.dot`.
+- Output a short clarification request (so ingestion fails fast) and STOP.
+- Ask exactly ONE disambiguation question and provide 2-5 options, each anchored by concrete repo evidence (paths/names).
+- Do NOT ask preference questions (language/framework/style).
+
+Required output format for this exception case:
+```
+NEEDS_CLARIFICATION
+Question: <single disambiguation question>
+Options:
+- [A] <option A> (evidence: <paths/names>)
+- [B] <option B> (evidence: <paths/names>)
+Reply with: A|B|...
+```
+
+Downstream requirement (after ambiguity is resolved interactively or via evidence):
+- Ensure `.ai/spec.md` includes a brief "Disambiguation / Assumptions" section documenting what was chosen/inferred and why.
+
+### Phase 0B: Pick Models + Executors + Parallelism + Thinking (Before Writing Any DOT)
 
 This phase exists to translate ambiguous requests (or partial constraints like "make it parallel with gemini") into a concrete, runnable model/executor plan.
 
@@ -184,7 +249,6 @@ When the requirements are short/vague and no spec file exists in the repo, add a
 ```
 expand_spec [
     shape=box,
-    timeout=600,
     auto_status=true,
     prompt="Given these requirements: [INLINE THE EXPANDED REQUIREMENTS HERE].
 
@@ -207,7 +271,6 @@ For EVERY implementation unit — including `impl_setup` — generate a PAIR of 
 impl_X [
     shape=box,
     class="hard",
-    timeout=1200,
     max_retries=2,
     prompt="..."
 ]
@@ -215,7 +278,6 @@ impl_X [
 verify_X [
     shape=box,
     class="verify",
-    timeout=300,
     prompt="Verify [UNIT]. Run: [BUILD_CMD] && [TEST_CMD]\nWrite results to .ai/verify_X.md.\nWrite status.json: outcome=success if all pass, outcome=fail with failure details otherwise."
 ]
 
@@ -288,7 +350,7 @@ Use language-appropriate commands: `go build`/`go test` for Go, `cargo build`/`c
 
 ### Phase 5: Model Selection
 
-Use Phase 0 to decide concrete model IDs, providers, executor plan, parallelism, and thinking. Then:
+Use Phase 0B to decide concrete model IDs, providers, executor plan, parallelism, and thinking. Then:
 
 - Assign `class` attributes based on Phase 2 complexity and node role: default, `hard`, `verify`, `review`.
 - Encode the chosen plan in the graph `model_stylesheet` so nodes inherit `llm_provider`, `llm_model`, and (optionally) `reasoning_effort`.
@@ -303,7 +365,7 @@ Use Phase 0 to decide concrete model IDs, providers, executor plan, parallelism,
 | `Msquare` | exit | Exit point. Exactly one. |
 | `box` | codergen | LLM task (default). |
 | `diamond` | conditional | Routes on edge conditions. |
-| `hexagon` | wait.human | Human approval gate. |
+| `hexagon` | wait.human | Human approval gate (only for interactive runners; do not rely on this for disambiguation). |
 
 ### Node attributes
 
@@ -338,7 +400,7 @@ Custom outcome values work: `outcome=port`, `outcome=skip`, `outcome=needs_fix`.
 6. **Inlining the spec.** Reference the spec file by path. Don't copy it into prompt attributes. Exception: `expand_spec` node bootstraps the spec.
 7. **Missing graph attributes.** Always set `goal`, `model_stylesheet`, `default_max_retry`.
 8. **Wrong shapes.** Start is `Mdiamond` not `circle`. Exit is `Msquare` not `doublecircle`.
-9. **No timeout.** Every codergen node needs `timeout`. Implementation: 1200. Verification: 300. Review: 600. Expand spec: 600.
+9. **Timeouts.** Do NOT include node-level `timeout` by default. Only add timeouts when explicitly requested; a single CLI run can legitimately take hours.
 10. **Build files after implementation.** Project setup (module file, directory structure) must be the FIRST implementation node.
 11. **Catastrophic review rollback.** Review failure (`check_review -> impl_X`) must target a LATE node (integration, CLI, or the last major impl). Never loop `check_review` back to `impl_setup` — this throws away all work. Target the last integration or polish node.
 12. **Missing verify class.** Every verify node MUST have `class="verify"` so the model stylesheet applies your intended verify model and thinking.
@@ -366,43 +428,43 @@ digraph linkcheck {
     start [shape=Mdiamond, label="Start"]
     exit  [shape=Msquare, label="Exit"]
 
-    // Spec expansion (vague input — bootstraps .ai/spec.md into existence)
-    expand_spec [
-        shape=box, timeout=600, auto_status=true,
-        prompt="Given the requirements: Build a Go CLI tool called linkcheck that takes a URL, crawls it, checks all links for HTTP status, reports broken ones. Supports robots.txt, configurable depth, JSON and text output.\n\nExpand into a detailed spec. Write to .ai/spec.md covering: CLI interface, packages, data types, error handling, test plan.\n\nWrite status.json: outcome=success"
-    ]
+	    // Spec expansion (vague input — bootstraps .ai/spec.md into existence)
+	    expand_spec [
+	        shape=box, auto_status=true,
+	        prompt="Given the requirements: Build a Go CLI tool called linkcheck that takes a URL, crawls it, checks all links for HTTP status, reports broken ones. Supports robots.txt, configurable depth, JSON and text output.\n\nExpand into a detailed spec. Write to .ai/spec.md covering: CLI interface, packages, data types, error handling, test plan.\n\nWrite status.json: outcome=success"
+	    ]
 
-    // Project setup
-    impl_setup [
-        shape=box, timeout=600,
-        prompt="Goal: $goal\n\nRead .ai/spec.md. Create Go project: go.mod, cmd/linkcheck/main.go stub, pkg/ directories.\n\nRun: go build ./...\n\nWrite status.json: outcome=success if builds, outcome=fail otherwise."
-    ]
+	    // Project setup
+	    impl_setup [
+	        shape=box,
+	        prompt="Goal: $goal\n\nRead .ai/spec.md. Create Go project: go.mod, cmd/linkcheck/main.go stub, pkg/ directories.\n\nRun: go build ./...\n\nWrite status.json: outcome=success if builds, outcome=fail otherwise."
+	    ]
 
-    verify_setup [
-        shape=box, class="verify", timeout=300,
-        prompt="Verify project setup.\n\nRun:\n1. go build ./...\n2. go vet ./...\n3. Check go.mod and cmd/ exist\n\nWrite results to .ai/verify_setup.md.\nWrite status.json: outcome=success if all pass, outcome=fail with details."
-    ]
+	    verify_setup [
+	        shape=box, class="verify",
+	        prompt="Verify project setup.\n\nRun:\n1. go build ./...\n2. go vet ./...\n3. Check go.mod and cmd/ exist\n\nWrite results to .ai/verify_setup.md.\nWrite status.json: outcome=success if all pass, outcome=fail with details."
+	    ]
 
     check_setup [shape=diamond, label="Setup OK?"]
 
-    // Core implementation
-    impl_core [
-        shape=box, class="hard", timeout=1200, max_retries=2,
-        prompt="Goal: $goal\n\nRead .ai/spec.md. Implement: URL crawling, link extraction, HTTP checking, robots.txt parser, output formatters (text + JSON). Create tests.\n\nRun: go test ./...\n\nWrite status.json: outcome=success if tests pass, outcome=fail otherwise."
-    ]
+	    // Core implementation
+	    impl_core [
+	        shape=box, class="hard", max_retries=2,
+	        prompt="Goal: $goal\n\nRead .ai/spec.md. Implement: URL crawling, link extraction, HTTP checking, robots.txt parser, output formatters (text + JSON). Create tests.\n\nRun: go test ./...\n\nWrite status.json: outcome=success if tests pass, outcome=fail otherwise."
+	    ]
 
-    verify_core [
-        shape=box, class="verify", timeout=300,
-        prompt="Verify core implementation.\n\nRun:\n1. go build ./...\n2. go vet ./...\n3. go test ./... -v\n\nWrite results to .ai/verify_core.md.\nWrite status.json: outcome=success if all pass, outcome=fail with details."
-    ]
+	    verify_core [
+	        shape=box, class="verify",
+	        prompt="Verify core implementation.\n\nRun:\n1. go build ./...\n2. go vet ./...\n3. go test ./... -v\n\nWrite results to .ai/verify_core.md.\nWrite status.json: outcome=success if all pass, outcome=fail with details."
+	    ]
 
     check_core [shape=diamond, label="Core OK?"]
 
-    // Review
-    review [
-        shape=box, class="review", timeout=600, goal_gate=true,
-        prompt="Goal: $goal\n\nRead .ai/spec.md. Review the full implementation against the spec. Check: all features implemented, tests pass, CLI works, error handling correct.\n\nRun: go build ./cmd/linkcheck && go test ./...\n\nWrite review to .ai/final_review.md.\nWrite status.json: outcome=success if complete, outcome=fail with what's missing."
-    ]
+	    // Review
+	    review [
+	        shape=box, class="review", goal_gate=true,
+	        prompt="Goal: $goal\n\nRead .ai/spec.md. Review the full implementation against the spec. Check: all features implemented, tests pass, CLI works, error handling correct.\n\nRun: go build ./cmd/linkcheck && go test ./...\n\nWrite review to .ai/final_review.md.\nWrite status.json: outcome=success if complete, outcome=fail with what's missing."
+	    ]
 
     check_review [shape=diamond, label="Review OK?"]
 

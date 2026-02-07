@@ -6,10 +6,10 @@ digraph dttf {
         retry_target="impl_setup",
         fallback_retry_target="impl_loader",
         model_stylesheet="
-            * { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: medium; }
-            .hard { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: high; }
-            .verify { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: medium; }
-            .review { llm_model: gpt-5.2-codex; llm_provider: openai; reasoning_effort: high; }
+            * { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: medium; }
+            .hard { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: high; }
+            .verify { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: medium; }
+            .review { llm_model: gemini-3-flash-preview; llm_provider: google; reasoning_effort: high; }
         "
     ]
 
@@ -19,7 +19,6 @@ digraph dttf {
     // Project setup
     impl_setup [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read specs/dttf-v1.md sections 4 (Architecture) and 7 (Data Structures).
@@ -38,7 +37,6 @@ Write status.json: outcome=success if builds, outcome=fail with failure_reason o
     verify_setup [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify project setup was completed correctly.
 
 Run:
@@ -55,7 +53,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // PNG loader implementation
     impl_loader [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read specs/dttf-v1.md sections 1 (Input) and 4.3 (Pipeline).
@@ -80,7 +77,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_loader [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify PNG loader implementation.
 
 Run:
@@ -98,7 +94,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     impl_tracer [
         shape=box,
         class="hard",
-        timeout=1200,
         max_retries=2,
         prompt="Goal: $goal
 
@@ -126,7 +121,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_tracer [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify tracer implementation.
 
 Run:
@@ -145,7 +139,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Metrics computation
     impl_metrics [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read specs/dttf-v1.md section 2.6 (Glyph Metrics).
@@ -168,7 +161,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_metrics [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify metrics computation.
 
 Run:
@@ -186,7 +178,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     impl_tables [
         shape=box,
         class="hard",
-        timeout=1200,
         max_retries=2,
         prompt="Goal: $goal
 
@@ -214,7 +205,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_tables [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify TrueType table assembly.
 
 Run:
@@ -233,7 +223,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Font writer
     impl_writer [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read specs/dttf-v1.md section 8 (File Assembly).
@@ -263,7 +252,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_writer [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify font writer and Build function.
 
 Run:
@@ -281,7 +269,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Validator
     impl_validator [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read specs/dttf-v1.md section 5.1 (Font Validity) and section 9 (Error Handling).
@@ -307,7 +294,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_validator [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify validator implementation.
 
 Run:
@@ -324,7 +310,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Rasterizer
     impl_rasterizer [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read specs/dttf-v1.md section 11 (Rasterizer).
@@ -350,7 +335,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_rasterizer [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify rasterizer implementation.
 
 Run:
@@ -367,7 +351,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // CLI implementation
     impl_cli [
         shape=box,
-        timeout=1200,
         prompt="Goal: $goal
 
 Read specs/dttf-v1.md sections 4.2 (API Surface) and 12 (CLI Reference).
@@ -392,7 +375,6 @@ Write status.json: outcome=success if all commands work, outcome=fail with failu
     verify_cli [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify CLI implementation.
 
 Run:
@@ -414,7 +396,6 @@ Write status.json: outcome=success if ALL commands exist and show help, outcome=
     impl_test_harness [
         shape=box,
         class="hard",
-        timeout=1200,
         max_retries=2,
         goal_gate=true,
         prompt="Goal: $goal
@@ -445,7 +426,6 @@ Write status.json: outcome=success if all pass, outcome=fail with failure_reason
     verify_test_harness [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify test harness implementation.
 
 Run:
@@ -464,7 +444,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     // Integration test
     impl_integration [
         shape=box,
-        timeout=1200,
         goal_gate=true,
         prompt="Goal: $goal
 
@@ -490,7 +469,6 @@ Write status.json: outcome=success if all criteria pass, outcome=fail with failu
     verify_integration [
         shape=box,
         class="verify",
-        timeout=300,
         prompt="Verify integration test results.
 
 Run:
@@ -509,7 +487,6 @@ Write status.json: outcome=success if ALL pass, outcome=fail with details."
     review [
         shape=box,
         class="review",
-        timeout=600,
         goal_gate=true,
         prompt="Goal: $goal
 
