@@ -13,6 +13,12 @@ Take English requirements of any size and produce a valid `.dot` pipeline file t
 - Input ranges from "solitaire plz" to a path to a 600-line spec
 - You need to produce a `.dot` file, not code
 
+## Output Format
+
+When invoked programmatically (via CLI), output ONLY the raw `.dot` file content. No markdown fences, no explanatory text before or after the digraph. The output must start with `digraph` and end with the closing `}`.
+
+When invoked interactively (in conversation), you may include explanatory text.
+
 ## Process
 
 ### Phase 1: Requirements Expansion
