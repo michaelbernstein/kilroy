@@ -206,7 +206,7 @@ lines = [ln.strip() for ln in stylesheet.splitlines() if ln.strip()]
 indented = "\n".join("            " + ln for ln in lines)
 replacement = 'model_stylesheet="\\n' + indented + '\\n        "'
 
-out, n = re.subn(r'model_stylesheet\\s*=\\s*\".*?\"', replacement, src, count=1, flags=re.S)
+out, n = re.subn(r'model_stylesheet\s*=\s*".*?"', replacement, src, count=1, flags=re.S)
 if n != 1:
     raise SystemExit(f"expected to replace exactly 1 model_stylesheet, replaced {n}")
 graph_path.write_text(out)
@@ -233,7 +233,7 @@ lines = [ln.strip() for ln in stylesheet.splitlines() if ln.strip()]
 indented = \"\\n\".join(\"            \" + ln for ln in lines)
 replacement = 'model_stylesheet=\"\\\\n' + indented + '\\\\n        \"'
 
-out, n = re.subn(r'model_stylesheet\\s*=\\s*\".*?\"', replacement, src, count=1, flags=re.S)
+out, n = re.subn(r'model_stylesheet\s*=\s*".*?"', replacement, src, count=1, flags=re.S)
 if n != 1:
     raise SystemExit(f\"expected to replace exactly 1 model_stylesheet, replaced {n}\")
 graph_path.write_text(out)
@@ -253,7 +253,7 @@ import pathlib, re, sys
 path = pathlib.Path(sys.argv[1])
 txt = path.read_text()
 providers = set()
-for m in re.finditer(r'llm_provider\\s*:\\s*([a-zA-Z0-9_-]+)\\s*;', txt):
+for m in re.finditer(r'llm_provider\s*:\s*([a-zA-Z0-9_-]+)\s*;', txt):
     p = m.group(1).strip().lower()
     if p == "gemini":
         p = "google"
