@@ -217,8 +217,8 @@ PY
       exit 1
     fi
     base_model="${KILROY_BENCH_OVERRIDE_MODEL_BASE:-gpt-5.2}"
-    hard_model="${KILROY_BENCH_OVERRIDE_MODEL_HARD:-gpt-5.2-pro}"
-    verify_model="${KILROY_BENCH_OVERRIDE_MODEL_VERIFY:-gpt-5.2-mini}"
+    hard_model="${KILROY_BENCH_OVERRIDE_MODEL_HARD:-$base_model}"
+    verify_model="${KILROY_BENCH_OVERRIDE_MODEL_VERIFY:-$base_model}"
     review_model="${KILROY_BENCH_OVERRIDE_MODEL_REVIEW:-$hard_model}"
     echo "WARNING: overriding model_stylesheet preset: provider=openai base=$base_model hard=$hard_model verify=$verify_model review=$review_model"
     python3 - "$graph" "$base_model" "$hard_model" "$verify_model" "$review_model" <<'PY' || return 1
