@@ -51,7 +51,7 @@ if [[ -n "$schema" ]]; then
   [[ -f "$schema" ]] || { echo "missing schema: $schema" >&2; exit 2; }
 fi
 if [[ -n "$out" ]]; then
-  echo '{"final":"ok"}' > "$out"
+  echo '{"final":"ok","summary":"ok"}' > "$out"
 fi
 
 echo 'from_cli' > cli_wrote.txt

@@ -804,6 +804,41 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		}
 	}
 
+	if runErr == nil && providerKey == "openai" && hasArg(runArgs, "--output-schema") && strings.TrimSpace(structuredOutPath) != "" {
+		unknownKeys, payload, contractErr := inspectCodexStructuredOutputContract(structuredOutPath)
+		if contractErr != nil {
+			return "", classifiedFailure(contractErr, readStderr()), nil
+		}
+		if len(unknownKeys) > 0 {
+			warnEngine(execCtx, fmt.Sprintf("codex structured output has unknown keys; retrying once without --output-schema (keys=%s)", strings.Join(unknownKeys, ",")))
+			artifact := map[string]any{
+				"unknown_keys": unknownKeys,
+				"payload":      payload,
+			}
+			if err := writeJSON(filepath.Join(stageDir, "structured_output_unknown_keys.json"), artifact); err != nil {
+				warnEngine(execCtx, fmt.Sprintf("write structured_output_unknown_keys.json: %v", err))
+			}
+
+			retryArgs := removeArgWithValue(runArgs, "--output-schema")
+			inv["schema_fallback_retry"] = true
+			inv["schema_fallback_reason"] = "unknown_structured_keys"
+			inv["structured_output_unknown_keys"] = unknownKeys
+			inv["argv_schema_retry"] = retryArgs
+			if err := writeJSON(filepath.Join(stageDir, "cli_invocation.json"), inv); err != nil {
+				warnEngine(execCtx, fmt.Sprintf("write cli_invocation.json unknown-keys metadata: %v", err))
+			}
+
+			retryErr, retryExitCode, retryDur, retryRunErr := runOnce(retryArgs)
+			if retryRunErr != nil {
+				return "", classifiedFailure(retryRunErr, readStderr()), nil
+			}
+			runErr = retryErr
+			exitCode = retryExitCode
+			dur += retryDur
+			runArgs = retryArgs
+		}
+	}
+
 	if runErr != nil && providerKey == "openai" {
 		stderrBytes, readErr := os.ReadFile(stderrPath)
 		if readErr == nil && isStateDBDiscrepancy(string(stderrBytes)) {
@@ -1250,7 +1285,7 @@ const defaultCodexOutputSchema = `{
     "summary": { "type": "string" }
   },
   "required": ["final", "summary"],
-  "additionalProperties": false
+  "additionalProperties": true
 }
 `
 
@@ -1259,6 +1294,36 @@ func isSchemaValidationFailure(stderr string) bool {
 	return strings.Contains(s, "invalid_json_schema") ||
 		strings.Contains(s, "invalid schema for response_format") ||
 		strings.Contains(s, "invalid schema")
+}
+
+func inspectCodexStructuredOutputContract(outputPath string) ([]string, map[string]any, error) {
+	raw, err := os.ReadFile(outputPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, nil, fmt.Errorf("parse structured output %s: %w", outputPath, err)
+	}
+	requiredKeys := []string{"final", "summary"}
+	for _, key := range requiredKeys {
+		val, ok := payload[key]
+		if !ok {
+			return nil, payload, fmt.Errorf("structured output missing required key %q", key)
+		}
+		if _, ok := val.(string); !ok {
+			return nil, payload, fmt.Errorf("structured output key %q must be string", key)
+		}
+	}
+	unknown := make([]string, 0)
+	for key := range payload {
+		if key == "final" || key == "summary" {
+			continue
+		}
+		unknown = append(unknown, key)
+	}
+	sort.Strings(unknown)
+	return unknown, payload, nil
 }
 
 func isStateDBDiscrepancy(stderr string) bool {
