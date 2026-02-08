@@ -32,6 +32,22 @@ func TestDefaultCLIInvocation_GoogleGeminiNonInteractive(t *testing.T) {
 	}
 }
 
+func TestDefaultCLIInvocation_AnthropicIncludesVerboseForStreamJSON(t *testing.T) {
+	exe, args := defaultCLIInvocation("anthropic", "claude-sonnet-4", "/tmp/worktree")
+	if exe == "" {
+		t.Fatalf("expected non-empty executable for anthropic")
+	}
+	if !hasArg(args, "--output-format") {
+		t.Fatalf("expected --output-format in args; args=%v", args)
+	}
+	if !hasArg(args, "stream-json") {
+		t.Fatalf("expected stream-json output format; args=%v", args)
+	}
+	if !hasArg(args, "--verbose") {
+		t.Fatalf("expected --verbose for stream-json contract compatibility; args=%v", args)
+	}
+}
+
 func TestDefaultCLIInvocation_OpenAI_DoesNotUseDeprecatedAskForApproval(t *testing.T) {
 	exe, args := defaultCLIInvocation("openai", "gpt-5.3-codex", "/tmp/worktree")
 	if exe == "" {
