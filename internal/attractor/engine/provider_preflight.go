@@ -50,6 +50,7 @@ func runProviderCLIPreflight(ctx context.Context, g *model.Graph, cfg *RunConfig
 		StrictCapabilities:  parseBool(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_STRICT_CAPABILITIES")), false),
 		CapabilityProbeMode: capabilityProbeMode(),
 	}
+	strictModelProbes := parseBool(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_STRICT_MODEL_PROBES")), false)
 	defer func() {
 		_ = writePreflightReport(opts.LogsRoot, report)
 	}()
@@ -157,6 +158,60 @@ func runProviderCLIPreflight(ctx context.Context, g *model.Graph, cfg *RunConfig
 			Status:   preflightStatusPass,
 			Message:  "required capabilities detected",
 		})
+		if normalizeProviderKey(provider) != "google" {
+			continue
+		}
+
+		models := usedCLIModelsForProvider(g, cfg, provider)
+		if len(models) == 0 {
+			continue
+		}
+		if modelProbeMode() == "off" {
+			report.addCheck(providerPreflightCheck{
+				Name:     "provider_cli_model_access",
+				Provider: provider,
+				Status:   preflightStatusPass,
+				Message:  "model access probe disabled by KILROY_PREFLIGHT_MODEL_PROBES=off",
+			})
+			continue
+		}
+		for _, modelID := range models {
+			output, probeErr := runProviderModelAccessProbe(ctx, provider, resolvedPath, modelID)
+			if probeErr == nil {
+				report.addCheck(providerPreflightCheck{
+					Name:     "provider_cli_model_access",
+					Provider: provider,
+					Status:   preflightStatusPass,
+					Message:  fmt.Sprintf("model %s accepted by provider cli", modelID),
+				})
+				continue
+			}
+
+			combined := strings.ToLower(strings.TrimSpace(output + "\n" + probeErr.Error()))
+			if normalizeProviderKey(provider) == "google" && isGoogleModelNotFound(combined) {
+				report.addCheck(providerPreflightCheck{
+					Name:     "provider_cli_model_access",
+					Provider: provider,
+					Status:   preflightStatusFail,
+					Message:  fmt.Sprintf("model %s not available to configured account/endpoint", modelID),
+				})
+				return report, fmt.Errorf("preflight: provider %s model probe failed for model %s: model not available", provider, modelID)
+			}
+
+			status := preflightStatusWarn
+			if strictModelProbes {
+				status = preflightStatusFail
+			}
+			report.addCheck(providerPreflightCheck{
+				Name:     "provider_cli_model_access",
+				Provider: provider,
+				Status:   status,
+				Message:  fmt.Sprintf("model %s probe failed: %v", modelID, probeErr),
+			})
+			if strictModelProbes {
+				return report, fmt.Errorf("preflight: provider %s model probe failed for model %s: %w", provider, modelID, probeErr)
+			}
+		}
 	}
 
 	return report, nil
@@ -194,6 +249,13 @@ func capabilityProbeMode() string {
 	return "on"
 }
 
+func modelProbeMode() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_MODEL_PROBES")), "off") {
+		return "off"
+	}
+	return "on"
+}
+
 func usedCLIProviders(g *model.Graph, cfg *RunConfigFile) []string {
 	used := map[string]bool{}
 	if g == nil {
@@ -218,6 +280,67 @@ func usedCLIProviders(g *model.Graph, cfg *RunConfigFile) []string {
 	}
 	sort.Strings(providers)
 	return providers
+}
+
+func usedCLIModelsForProvider(g *model.Graph, cfg *RunConfigFile, provider string) []string {
+	provider = normalizeProviderKey(provider)
+	if provider == "" || g == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	models := []string{}
+	for _, n := range g.Nodes {
+		if n == nil || n.Shape() != "box" {
+			continue
+		}
+		nodeProvider := normalizeProviderKey(n.Attr("llm_provider", ""))
+		if nodeProvider == "" || nodeProvider != provider {
+			continue
+		}
+		if backendFor(cfg, nodeProvider) != BackendCLI {
+			continue
+		}
+		modelID := strings.TrimSpace(n.Attr("llm_model", ""))
+		if modelID == "" {
+			modelID = strings.TrimSpace(n.Attr("model", ""))
+		}
+		if modelID == "" || seen[modelID] {
+			continue
+		}
+		seen[modelID] = true
+		models = append(models, modelID)
+	}
+	sort.Strings(models)
+	return models
+}
+
+func runProviderModelAccessProbe(ctx context.Context, provider string, exePath string, modelID string) (string, error) {
+	if normalizeProviderKey(provider) != "google" {
+		return "", nil
+	}
+	args := []string{"-p", "--output-format", "stream-json", "--yolo", "--model", modelID}
+	args = insertPromptArg(args, "respond with OK")
+
+	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(probeCtx, exePath, args...)
+	cmd.Stdin = strings.NewReader("")
+	cmd.Env = scrubPreflightProbeEnv(os.Environ())
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	err := cmd.Run()
+	output := strings.TrimSpace(out.String())
+	if probeCtx.Err() == context.DeadlineExceeded {
+		return output, fmt.Errorf("probe timed out after 12s")
+	}
+	if err != nil {
+		return output, fmt.Errorf("probe command failed: %w", err)
+	}
+	return output, nil
 }
 
 func runProviderCapabilityProbe(ctx context.Context, provider string, exePath string) (string, error) {

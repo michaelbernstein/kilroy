@@ -73,6 +73,8 @@ func TestBuildCodexIsolatedEnv_ConfiguresCodexScopedOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	stateBase := filepath.Join(t.TempDir(), "codex-state-base")
+	t.Setenv("KILROY_CODEX_STATE_BASE", stateBase)
 
 	stageDir := t.TempDir()
 	env, meta, err := buildCodexIsolatedEnv(stageDir)
@@ -80,25 +82,35 @@ func TestBuildCodexIsolatedEnv_ConfiguresCodexScopedOverrides(t *testing.T) {
 		t.Fatalf("buildCodexIsolatedEnv: %v", err)
 	}
 
+	wantHome, err := codexIsolatedHomeDir(stageDir, "codex-home")
+	if err != nil {
+		t.Fatalf("codexIsolatedHomeDir: %v", err)
+	}
 	stateRoot := strings.TrimSpace(anyToString(meta["state_root"]))
-	wantStateRoot := filepath.Join(stageDir, "codex-home", ".codex")
+	wantStateRoot := filepath.Join(wantHome, ".codex")
 	if stateRoot != wantStateRoot {
 		t.Fatalf("state_root: got %q want %q", stateRoot, wantStateRoot)
 	}
-	if got := envLookup(env, "HOME"); got != filepath.Join(stageDir, "codex-home") {
-		t.Fatalf("HOME: got %q", got)
+	if got := envLookup(env, "HOME"); got != wantHome {
+		t.Fatalf("HOME: got %q want %q", got, wantHome)
 	}
 	if got := envLookup(env, "CODEX_HOME"); got != wantStateRoot {
 		t.Fatalf("CODEX_HOME: got %q want %q", got, wantStateRoot)
 	}
-	if got := envLookup(env, "XDG_CONFIG_HOME"); got != filepath.Join(stageDir, "codex-home", ".config") {
+	if got := envLookup(env, "XDG_CONFIG_HOME"); got != filepath.Join(wantHome, ".config") {
 		t.Fatalf("XDG_CONFIG_HOME: got %q", got)
 	}
-	if got := envLookup(env, "XDG_DATA_HOME"); got != filepath.Join(stageDir, "codex-home", ".local", "share") {
+	if got := envLookup(env, "XDG_DATA_HOME"); got != filepath.Join(wantHome, ".local", "share") {
 		t.Fatalf("XDG_DATA_HOME: got %q", got)
 	}
-	if got := envLookup(env, "XDG_STATE_HOME"); got != filepath.Join(stageDir, "codex-home", ".local", "state") {
+	if got := envLookup(env, "XDG_STATE_HOME"); got != filepath.Join(wantHome, ".local", "state") {
 		t.Fatalf("XDG_STATE_HOME: got %q", got)
+	}
+	if strings.HasPrefix(stateRoot, filepath.Clean(stageDir)+string(filepath.Separator)) || stateRoot == filepath.Clean(stageDir) {
+		t.Fatalf("state_root should not be inside stageDir: stage=%q state_root=%q", stageDir, stateRoot)
+	}
+	if !strings.HasPrefix(stateRoot, filepath.Clean(stateBase)+string(filepath.Separator)) && stateRoot != filepath.Clean(stateBase) {
+		t.Fatalf("state_root should be inside KILROY_CODEX_STATE_BASE=%q, got %q", stateBase, stateRoot)
 	}
 
 	assertExists(t, filepath.Join(wantStateRoot, "auth.json"))
@@ -135,6 +147,7 @@ func TestCodexCLIInvocation_StateRootIsAbsolute(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	defer func() { _ = os.Chdir(oldWD) }()
+	t.Setenv("KILROY_CODEX_STATE_BASE", filepath.Join(wd, "state-base"))
 
 	stageDir := filepath.Join("relative", "stage")
 	_, meta, err := buildCodexIsolatedEnv(stageDir)

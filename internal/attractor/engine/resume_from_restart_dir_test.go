@@ -58,6 +58,8 @@ func TestResume_RestoresAbsoluteStateRootForCodex(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	defer func() { _ = os.Chdir(oldWD) }()
+	stateBase := filepath.Join(wd, ".codex-state-base")
+	t.Setenv("KILROY_CODEX_STATE_BASE", stateBase)
 
 	relStageDir := filepath.Join("restart-4", "a")
 	env, meta, err := buildCodexIsolatedEnvWithName(relStageDir, "codex-home")
@@ -69,7 +71,7 @@ func TestResume_RestoresAbsoluteStateRootForCodex(t *testing.T) {
 	if !filepath.IsAbs(stateRoot) {
 		t.Fatalf("state_root should be absolute, got %q", stateRoot)
 	}
-	wantPrefix := filepath.Join(wd, "restart-4", "a", "codex-home")
+	wantPrefix := filepath.Join(stateBase, "codex-home-")
 	if !strings.HasPrefix(stateRoot, wantPrefix) {
 		t.Fatalf("state_root should be under %q, got %q", wantPrefix, stateRoot)
 	}

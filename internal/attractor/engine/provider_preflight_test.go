@@ -87,6 +87,84 @@ func TestRunWithConfig_AllowsCLIModel_WhenCatalogHasProviderMatch(t *testing.T) 
 	}
 }
 
+func TestRunWithConfig_PreflightFails_WhenGoogleModelProbeReportsModelNotFound(t *testing.T) {
+	repo := initTestRepo(t)
+	catalog := writeCatalogForPreflight(t, `{
+  "gemini/gemini-3-pro-preview": {
+    "litellm_provider": "google",
+    "mode": "chat"
+  }
+}`)
+	t.Setenv("KILROY_GEMINI_PATH", writeFakeCLIWithModelProbeFailure(
+		t,
+		"gemini",
+		"Usage: gemini -p --output-format stream-json --yolo --approval-mode",
+		0,
+		"gemini-3-pro-preview",
+		"ModelNotFoundError: Requested entity was not found.",
+		1,
+	))
+
+	cfg := testPreflightConfigForProviders(repo, catalog, map[string]BackendKind{
+		"google": BackendCLI,
+	})
+	dot := singleProviderDot("google", "gemini-3-pro-preview")
+
+	logsRoot := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "preflight-model-not-found", LogsRoot: logsRoot})
+	if err == nil {
+		t.Fatalf("expected model probe preflight error, got nil")
+	}
+	if !strings.Contains(err.Error(), "preflight: provider google model probe failed for model gemini-3-pro-preview: model not available") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	report := mustReadPreflightReport(t, logsRoot)
+	if report.Summary.Fail == 0 {
+		t.Fatalf("expected failed preflight model-access check, got %+v", report.Summary)
+	}
+}
+
+func TestRunWithConfig_PreflightModelProbeFailure_WarnsWhenNonStrict(t *testing.T) {
+	repo := initTestRepo(t)
+	catalog := writeCatalogForPreflight(t, `{
+  "gemini/gemini-3-pro-preview": {
+    "litellm_provider": "google",
+    "mode": "chat"
+  }
+}`)
+	t.Setenv("KILROY_GEMINI_PATH", writeFakeCLIWithModelProbeFailure(
+		t,
+		"gemini",
+		"Usage: gemini -p --output-format stream-json --yolo --approval-mode",
+		0,
+		"gemini-3-pro-preview",
+		"temporary backend issue",
+		1,
+	))
+
+	cfg := testPreflightConfigForProviders(repo, catalog, map[string]BackendKind{
+		"google": BackendCLI,
+	})
+	dot := singleProviderDot("google", "gemini-3-pro-preview")
+
+	logsRoot := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "preflight-model-warn", LogsRoot: logsRoot})
+	if err == nil {
+		t.Fatalf("expected downstream cxdb error, got nil")
+	}
+	if strings.Contains(err.Error(), "preflight: provider google model probe failed") {
+		t.Fatalf("expected non-strict model probe failure to warn and continue, got %v", err)
+	}
+	report := mustReadPreflightReport(t, logsRoot)
+	if report.Summary.Warn == 0 {
+		t.Fatalf("expected warning in preflight report, got %+v", report.Summary)
+	}
+}
+
 func TestRunWithConfig_PreflightFails_WhenProviderCLIBinaryMissing(t *testing.T) {
 	repo := initTestRepo(t)
 	catalog := writeCatalogForPreflight(t, `{
@@ -298,6 +376,43 @@ echo "ok"
 `, helpOutput, helpExit)
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake cli: %v", err)
+	}
+	return p
+}
+
+func writeFakeCLIWithModelProbeFailure(t *testing.T, name string, helpOutput string, helpExit int, failModel string, failStderr string, failExit int) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "exec" && "${2:-}" == "--help" ]]; then
+cat <<'EOF'
+%s
+EOF
+exit %d
+fi
+model=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model)
+      model="${2:-}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ "$model" == %q ]]; then
+cat <<'ERR' >&2
+%s
+ERR
+exit %d
+fi
+echo "ok"
+`, helpOutput, helpExit, failModel, failStderr, failExit)
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake cli with model probe failure: %v", err)
 	}
 	return p
 }

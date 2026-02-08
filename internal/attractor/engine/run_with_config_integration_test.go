@@ -118,8 +118,6 @@ digraph G {
 	assertExists(t, filepath.Join(res.LogsRoot, "a", "output.json"))
 	assertExists(t, filepath.Join(res.LogsRoot, "a", "stage.tgz"))
 	assertExists(t, filepath.Join(res.LogsRoot, "run.tgz"))
-	assertExists(t, filepath.Join(res.LogsRoot, "a", "codex-home", ".codex", "auth.json"))
-	assertExists(t, filepath.Join(res.LogsRoot, "a", "codex-home", ".codex", "config.toml"))
 
 	stageEntries := listTarGzEntries(t, filepath.Join(res.LogsRoot, "a", "stage.tgz"))
 	assertNoCodexStateEntries(t, stageEntries)
@@ -141,8 +139,14 @@ digraph G {
 	if strings.TrimSpace(anyToString(inv["env_scope"])) != "codex" {
 		t.Fatalf("env_scope: %#v", inv["env_scope"])
 	}
-	if _, ok := inv["state_root"]; !ok {
+	stateRoot := strings.TrimSpace(anyToString(inv["state_root"]))
+	if stateRoot == "" {
 		t.Fatalf("state_root missing: %#v", inv)
+	}
+	assertExists(t, filepath.Join(stateRoot, "auth.json"))
+	assertExists(t, filepath.Join(stateRoot, "config.toml"))
+	if strings.HasPrefix(stateRoot, filepath.Clean(res.LogsRoot)+string(filepath.Separator)) || stateRoot == filepath.Clean(res.LogsRoot) {
+		t.Fatalf("state_root should be outside logs root: logs_root=%q state_root=%q", res.LogsRoot, stateRoot)
 	}
 	if strings.TrimSpace(anyToString(inv["working_dir"])) == "" {
 		t.Fatalf("working_dir missing in invocation: %#v", inv["working_dir"])

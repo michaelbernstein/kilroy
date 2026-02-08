@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -883,11 +885,10 @@ func buildCodexIsolatedEnv(stageDir string) ([]string, map[string]any, error) {
 }
 
 func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string) ([]string, map[string]any, error) {
-	absStageDir, err := filepath.Abs(stageDir)
+	codexHome, err := codexIsolatedHomeDir(stageDir, homeDirName)
 	if err != nil {
 		return nil, nil, err
 	}
-	codexHome := filepath.Join(absStageDir, homeDirName)
 	codexStateRoot := filepath.Join(codexHome, ".codex")
 	xdgConfigHome := filepath.Join(codexHome, ".config")
 	xdgDataHome := filepath.Join(codexHome, ".local", "share")
@@ -926,6 +927,7 @@ func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string) ([]strin
 	})
 
 	meta := map[string]any{
+		"state_base_root":  codexStateBaseRoot(),
 		"state_root":       codexStateRoot,
 		"env_seeded_files": seeded,
 	}
@@ -933,6 +935,42 @@ func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string) ([]strin
 		meta["env_seed_errors"] = seedErrors
 	}
 	return env, meta, nil
+}
+
+func codexIsolatedHomeDir(stageDir string, homeDirName string) (string, error) {
+	absStageDir, err := filepath.Abs(stageDir)
+	if err != nil {
+		return "", err
+	}
+	homeDirName = strings.TrimSpace(homeDirName)
+	if homeDirName == "" {
+		homeDirName = "codex-home"
+	}
+	sum := sha256.Sum256([]byte(absStageDir + "|" + homeDirName))
+	short := hex.EncodeToString(sum[:8])
+	return filepath.Join(codexStateBaseRoot(), fmt.Sprintf("%s-%s", homeDirName, short)), nil
+}
+
+func codexStateBaseRoot() string {
+	if override := strings.TrimSpace(os.Getenv("KILROY_CODEX_STATE_BASE")); override != "" {
+		if abs, err := filepath.Abs(override); err == nil {
+			return abs
+		}
+	}
+	base := strings.TrimSpace(os.Getenv("XDG_STATE_HOME"))
+	if base == "" {
+		home := strings.TrimSpace(os.Getenv("HOME"))
+		if home == "" {
+			base = "."
+		} else {
+			base = filepath.Join(home, ".local", "state")
+		}
+	}
+	root := filepath.Join(base, "kilroy", "attractor", "codex-state")
+	if abs, err := filepath.Abs(root); err == nil {
+		return abs
+	}
+	return root
 }
 
 func copyIfExists(src string, dst string) (bool, error) {
