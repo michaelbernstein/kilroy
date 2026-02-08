@@ -3,10 +3,13 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -23,6 +26,56 @@ type preflightReportDoc struct {
 		Status   string `json:"status"`
 		Message  string `json:"message"`
 	} `json:"checks"`
+}
+
+func TestRunProviderCapabilityProbe_TimesOutAndKillsProcessGroup(t *testing.T) {
+	parentPIDPath := filepath.Join(t.TempDir(), "parent.pid")
+	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
+	cliPath := writeBlockingProbeCLI(t, "gemini", parentPIDPath, childPIDPath)
+
+	_, err := runProviderCapabilityProbe(context.Background(), "google", cliPath)
+	if err == nil {
+		t.Fatalf("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "probe timed out after 3s") {
+		t.Fatalf("unexpected timeout error: %v", err)
+	}
+
+	parentPID := mustReadPIDFile(t, parentPIDPath)
+	childPID := mustReadPIDFile(t, childPIDPath)
+	waitForProcessGone(t, parentPID, 5*time.Second)
+	waitForProcessGone(t, childPID, 5*time.Second)
+}
+
+func TestRunProviderCapabilityProbe_RespectsParentContextCancel(t *testing.T) {
+	parentPIDPath := filepath.Join(t.TempDir(), "parent.pid")
+	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
+	cliPath := writeBlockingProbeCLI(t, "gemini", parentPIDPath, childPIDPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := runProviderCapabilityProbe(ctx, "google", cliPath)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected cancellation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "probe canceled") {
+		t.Fatalf("unexpected cancel error: %v", err)
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("probe should stop on parent cancellation before timeout; elapsed=%s", elapsed)
+	}
+
+	parentPID := mustReadPIDFile(t, parentPIDPath)
+	childPID := mustReadPIDFile(t, childPIDPath)
+	waitForProcessGone(t, parentPID, 5*time.Second)
+	waitForProcessGone(t, childPID, 5*time.Second)
 }
 
 func TestRunWithConfig_FailsFast_WhenCLIModelNotInCatalogForProvider(t *testing.T) {
@@ -429,4 +482,62 @@ func mustReadPreflightReport(t *testing.T, logsRoot string) preflightReportDoc {
 		t.Fatalf("decode preflight report: %v", err)
 	}
 	return report
+}
+
+func writeBlockingProbeCLI(t *testing.T, name string, parentPIDPath string, childPIDPath string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+echo "$$" > %q
+sleep 300 &
+child="$!"
+echo "$child" > %q
+wait
+`, parentPIDPath, childPIDPath)
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write blocking probe cli: %v", err)
+	}
+	return p
+}
+
+func mustReadPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			pid, convErr := strconv.Atoi(strings.TrimSpace(string(b)))
+			if convErr != nil || pid <= 0 {
+				t.Fatalf("invalid pid in %s: %q (%v)", path, strings.TrimSpace(string(b)), convErr)
+			}
+			return pid
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read pid file %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for pid file %s", path)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func waitForProcessGone(t *testing.T, pid int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if !probeProcessExists(pid) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d still running after %s", pid, timeout)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func probeProcessExists(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }

@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -320,27 +321,7 @@ func runProviderModelAccessProbe(ctx context.Context, provider string, exePath s
 	}
 	args := []string{"-p", "--output-format", "stream-json", "--yolo", "--model", modelID}
 	args = insertPromptArg(args, "respond with OK")
-
-	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(probeCtx, exePath, args...)
-	cmd.Stdin = strings.NewReader("")
-	cmd.Env = scrubPreflightProbeEnv(os.Environ())
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	err := cmd.Run()
-	output := strings.TrimSpace(out.String())
-	if probeCtx.Err() == context.DeadlineExceeded {
-		return output, fmt.Errorf("probe timed out after 12s")
-	}
-	if err != nil {
-		return output, fmt.Errorf("probe command failed: %w", err)
-	}
-	return output, nil
+	return runProviderProbe(ctx, exePath, args, 12*time.Second)
 }
 
 func runProviderCapabilityProbe(ctx context.Context, provider string, exePath string) (string, error) {
@@ -348,10 +329,21 @@ func runProviderCapabilityProbe(ctx context.Context, provider string, exePath st
 	if normalizeProviderKey(provider) == "openai" {
 		argv = []string{"exec", "--help"}
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	help, err := runProviderProbe(ctx, exePath, argv, 3*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if help == "" {
+		return "", fmt.Errorf("probe output empty")
+	}
+	return help, nil
+}
+
+func runProviderProbe(ctx context.Context, exePath string, argv []string, timeout time.Duration) (string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.Command(exePath, argv...)
+	cmd := exec.CommandContext(probeCtx, exePath, argv...)
 	cmd.Stdin = strings.NewReader("")
 	cmd.Env = scrubPreflightProbeEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -365,45 +357,35 @@ func runProviderCapabilityProbe(ctx context.Context, provider string, exePath st
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	select {
-	case err := <-waitCh:
-		if err != nil {
-			return "", fmt.Errorf("probe command failed: %w", err)
-		}
-	case <-probeCtx.Done():
+	cleanup := func() {
 		_ = killProcessGroup(cmd, syscall.SIGTERM)
 		select {
 		case <-waitCh:
+			return
 		case <-time.After(250 * time.Millisecond):
-			_ = killProcessGroup(cmd, syscall.SIGKILL)
-			select {
-			case <-waitCh:
-			case <-time.After(2 * time.Second):
-			}
 		}
-		if probeCtx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("probe timed out after 3s")
-		}
-		return "", fmt.Errorf("probe canceled: %w", probeCtx.Err())
-	case <-ctx.Done():
-		_ = killProcessGroup(cmd, syscall.SIGTERM)
+		_ = killProcessGroup(cmd, syscall.SIGKILL)
 		select {
 		case <-waitCh:
-		case <-time.After(250 * time.Millisecond):
-			_ = killProcessGroup(cmd, syscall.SIGKILL)
-			select {
-			case <-waitCh:
-			case <-time.After(2 * time.Second):
-			}
+		case <-time.After(2 * time.Second):
 		}
-		return "", fmt.Errorf("probe canceled: %w", ctx.Err())
 	}
 
-	help := strings.TrimSpace(out.String())
-	if help == "" {
-		return "", fmt.Errorf("probe output empty")
+	select {
+	case err := <-waitCh:
+		output := strings.TrimSpace(out.String())
+		if err != nil {
+			return output, fmt.Errorf("probe command failed: %w", err)
+		}
+		return output, nil
+	case <-probeCtx.Done():
+		cleanup()
+		output := strings.TrimSpace(out.String())
+		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			return output, fmt.Errorf("probe timed out after %s", timeout)
+		}
+		return output, fmt.Errorf("probe canceled: %w", probeCtx.Err())
 	}
-	return help, nil
 }
 
 func missingCapabilityTokens(provider string, helpOutput string) []string {
