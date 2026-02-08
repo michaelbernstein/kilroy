@@ -1,0 +1,146 @@
+package engine
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+
+	"github.com/strongdm/kilroy/internal/attractor/model"
+	"github.com/strongdm/kilroy/internal/attractor/runtime"
+)
+
+const (
+	failureClassTransientInfra       = "transient_infra"
+	failureClassDeterministic        = "deterministic"
+	defaultLoopRestartSignatureLimit = 3
+)
+
+var (
+	failureSignatureWhitespaceRE = regexp.MustCompile(`\s+`)
+	failureSignatureHexRE        = regexp.MustCompile(`\b[0-9a-f]{7,64}\b`)
+	failureSignatureDigitsRE     = regexp.MustCompile(`\b\d+\b`)
+	transientInfraReasonHints    = []string{
+		"timeout",
+		"timed out",
+		"context deadline exceeded",
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"tls handshake timeout",
+		"i/o timeout",
+		"no route to host",
+		"temporary failure",
+		"temporarily unavailable",
+		"try again",
+		"rate limit",
+		"too many requests",
+		"service unavailable",
+		"gateway timeout",
+		"econnrefused",
+		"econnreset",
+		"dial tcp",
+		"transport is closing",
+		"502",
+		"503",
+		"504",
+	}
+)
+
+func isFailureLoopRestartOutcome(out runtime.Outcome) bool {
+	return out.Status == runtime.StatusFail || out.Status == runtime.StatusRetry
+}
+
+func classifyFailureClass(out runtime.Outcome) string {
+	if !isFailureLoopRestartOutcome(out) {
+		return ""
+	}
+	if hinted := normalizedFailureClass(readFailureClassHint(out)); hinted != "" {
+		return hinted
+	}
+
+	reason := strings.ToLower(strings.TrimSpace(out.FailureReason))
+	if reason == "" {
+		return failureClassDeterministic
+	}
+	for _, hint := range transientInfraReasonHints {
+		if strings.Contains(reason, hint) {
+			return failureClassTransientInfra
+		}
+	}
+	return failureClassDeterministic
+}
+
+func readFailureClassHint(out runtime.Outcome) string {
+	if out.Meta != nil {
+		if raw, ok := out.Meta["failure_class"]; ok {
+			if s := strings.TrimSpace(fmt.Sprint(raw)); s != "" && s != "<nil>" {
+				return s
+			}
+		}
+	}
+	if out.ContextUpdates != nil {
+		if raw, ok := out.ContextUpdates["failure_class"]; ok {
+			if s := strings.TrimSpace(fmt.Sprint(raw)); s != "" && s != "<nil>" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func normalizedFailureClass(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "<nil>":
+		return ""
+	case "transient", "transient_infra", "transient-infra", "infra_transient", "transient infra", "infrastructure_transient", "retryable":
+		return failureClassTransientInfra
+	case "deterministic", "non_transient", "non-transient", "permanent", "logic", "product":
+		return failureClassDeterministic
+	default:
+		return failureClassDeterministic
+	}
+}
+
+func normalizedFailureClassOrDefault(raw string) string {
+	if cls := normalizedFailureClass(raw); cls != "" {
+		return cls
+	}
+	return failureClassDeterministic
+}
+
+func loopRestartSignatureLimit(g *model.Graph) int {
+	if g == nil {
+		return defaultLoopRestartSignatureLimit
+	}
+	limit := parseInt(g.Attrs["loop_restart_signature_limit"], defaultLoopRestartSignatureLimit)
+	if limit < 1 {
+		return defaultLoopRestartSignatureLimit
+	}
+	return limit
+}
+
+func restartFailureSignature(nodeID string, out runtime.Outcome, failureClass string) string {
+	if !isFailureLoopRestartOutcome(out) {
+		return ""
+	}
+	reason := normalizeFailureReason(out.FailureReason)
+	if reason == "" {
+		reason = "status=" + strings.ToLower(strings.TrimSpace(string(out.Status)))
+	}
+	return strings.TrimSpace(nodeID) + "|" + normalizedFailureClassOrDefault(failureClass) + "|" + reason
+}
+
+func normalizeFailureReason(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if reason == "" {
+		return ""
+	}
+	reason = failureSignatureHexRE.ReplaceAllString(reason, "<hex>")
+	reason = failureSignatureDigitsRE.ReplaceAllString(reason, "<n>")
+	reason = failureSignatureWhitespaceRE.ReplaceAllString(reason, " ")
+	reason = strings.TrimSpace(reason)
+	if len(reason) > 240 {
+		reason = reason[:240]
+	}
+	return reason
+}

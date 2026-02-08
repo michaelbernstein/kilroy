@@ -76,13 +76,7 @@ func (e *Engine) cxdbStageFinished(ctx context.Context, node *model.Node, out ru
 	// Convenience tarball (metaspec SHOULD): stage.tgz.
 	stageTar := filepath.Join(stageDir, "stage.tgz")
 	if _, err := os.Stat(stageTar); err != nil {
-		_ = writeTarGz(stageTar, stageDir, func(rel string, d os.DirEntry) bool {
-			// Avoid recursive inclusion.
-			if rel == "stage.tgz" {
-				return false
-			}
-			return true
-		})
+		_ = writeTarGz(stageTar, stageDir, includeInStageArchive)
 	}
 	if _, err := os.Stat(filepath.Join(stageDir, "prompt.md")); err == nil {
 		_, _ = e.CXDB.PutArtifactFile(ctx, node.ID, "prompt.md", filepath.Join(stageDir, "prompt.md"))

@@ -138,11 +138,26 @@ func (h *ParallelHandler) runBranch(ctx context.Context, exec *Execution, parall
 	if key == "" {
 		key = fmt.Sprintf("branch-%d", idx+1)
 	}
+	prefix := strings.TrimSpace(exec.Engine.Options.RunBranchPrefix)
+	if prefix == "" {
+		msg := "parallel fan-out requires non-empty run_branch_prefix"
+		return parallelBranchResult{
+			BranchKey:   key,
+			BranchName:  "",
+			StartNodeID: edge.To,
+			StopNodeID:  joinID,
+			Error:       msg,
+			Outcome: runtime.Outcome{
+				Status:        runtime.StatusFail,
+				FailureReason: msg,
+			},
+		}
+	}
 
 	// IMPORTANT: git ref namespace rules forbid creating refs under an existing ref path.
 	// Since the main run branch is typically "attractor/run/<run_id>", parallel branches
 	// MUST NOT be nested under that ref. Use a sibling namespace instead.
-	branchName := fmt.Sprintf("%s/parallel/%s/%s/%s", exec.Engine.Options.RunBranchPrefix, exec.Engine.Options.RunID, sanitizeRefComponent(parallelNode.ID), key)
+	branchName := buildParallelBranch(prefix, exec.Engine.Options.RunID, parallelNode.ID, key)
 	branchRoot := filepath.Join(exec.LogsRoot, "parallel", parallelNode.ID, fmt.Sprintf("%02d-%s", idx+1, key))
 	worktreeDir := filepath.Join(branchRoot, "worktree")
 
@@ -247,7 +262,18 @@ func (h *FanInHandler) Execute(ctx context.Context, exec *Execution, node *model
 
 	winner, ok := selectHeuristicWinner(results)
 	if !ok {
-		return runtime.Outcome{Status: runtime.StatusFail, FailureReason: "all parallel branches failed"}, nil
+		failureClass := classifyParallelAllFailFailureClass(results)
+		return runtime.Outcome{
+			Status:        runtime.StatusFail,
+			FailureReason: "all parallel branches failed",
+			Meta: map[string]any{
+				"failure_class":     failureClass,
+				"failure_signature": parallelAllFailSignature(results, failureClass),
+			},
+			ContextUpdates: map[string]any{
+				"failure_class": failureClass,
+			},
+		}, nil
 	}
 
 	// Fast-forward the main run branch to the winner head.
@@ -360,6 +386,48 @@ func selectHeuristicWinner(results []parallelBranchResult) (parallelBranchResult
 		return cands[i].HeadSHA < cands[j].HeadSHA
 	})
 	return cands[0], true
+}
+
+func classifyParallelAllFailFailureClass(results []parallelBranchResult) string {
+	if len(results) == 0 {
+		return failureClassDeterministic
+	}
+	for _, r := range results {
+		cls := normalizedFailureClassOrDefault(readFailureClassHint(r.Outcome))
+		if cls != failureClassTransientInfra {
+			return failureClassDeterministic
+		}
+	}
+	return failureClassTransientInfra
+}
+
+func parallelAllFailSignature(results []parallelBranchResult, failureClass string) string {
+	parts := make([]string, 0, len(results))
+	for _, r := range results {
+		reason := normalizeFailureReason(r.Outcome.FailureReason)
+		if reason == "" {
+			reason = "status=" + strings.ToLower(strings.TrimSpace(string(r.Outcome.Status)))
+		}
+		key := strings.TrimSpace(r.BranchKey)
+		if key == "" {
+			key = strings.TrimSpace(r.BranchName)
+		}
+		if key == "" {
+			key = "unknown"
+		}
+		parts = append(parts, key+":"+reason)
+	}
+	sort.Strings(parts)
+	sig := fmt.Sprintf(
+		"parallel_all_failed|%s|branches=%d|%s",
+		normalizedFailureClassOrDefault(failureClass),
+		len(results),
+		strings.Join(parts, ";"),
+	)
+	if len(sig) > 512 {
+		sig = sig[:512]
+	}
+	return sig
 }
 
 func findJoinFanInNode(g *model.Graph, branches []*model.Edge) (string, error) {

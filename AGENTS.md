@@ -11,3 +11,11 @@ When you are executing `docs/strongdm/attractor/kilroy-metaspec.md`, you MUST:
 
 - Cursor: `cursor -r -g "path/to/file:line[:col]"`
 - VS Code: `code -r -g "path/to/file:line[:col]"`
+
+## Long-Running Attractor Launch
+
+- Prefer built-in detached mode so the launcher exits safely while the run continues:
+  `./kilroy attractor run --detach --graph <graph.dot> --config <run_config.json> --run-id <run_id> --logs-root <logs_root>`
+- Monitor progress and completion:
+  - `tail -f <logs_root>/progress.ndjson`
+  - `cat <logs_root>/final.json`

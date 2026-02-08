@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -65,6 +67,17 @@ echo '{"type":"done","text":"ok"}'
 		t.Fatal(err)
 	}
 	t.Setenv("KILROY_CODEX_PATH", cli)
+	seedHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(seedHome, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seedHome, ".codex", "auth.json"), []byte(`{"token":"seeded"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seedHome, ".codex", "config.toml"), []byte(`model = "gpt-5"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", seedHome)
 
 	cfg := &RunConfigFile{Version: 1}
 	cfg.Repo.Path = repo
@@ -106,6 +119,11 @@ digraph G {
 	assertExists(t, filepath.Join(res.LogsRoot, "a", "stage.tgz"))
 	assertExists(t, filepath.Join(res.LogsRoot, "run.tgz"))
 
+	stageEntries := listTarGzEntries(t, filepath.Join(res.LogsRoot, "a", "stage.tgz"))
+	assertNoCodexStateEntries(t, stageEntries)
+	runEntries := listTarGzEntries(t, filepath.Join(res.LogsRoot, "run.tgz"))
+	assertNoCodexStateEntries(t, runEntries)
+
 	// Invocation includes env capture fields (metaspec replayability).
 	var inv map[string]any
 	b, err := os.ReadFile(filepath.Join(res.LogsRoot, "a", "cli_invocation.json"))
@@ -115,12 +133,20 @@ digraph G {
 	if err := json.Unmarshal(b, &inv); err != nil {
 		t.Fatalf("unmarshal cli_invocation.json: %v", err)
 	}
-	if inv["env_mode"] != "inherit" {
-		t.Fatalf("env_mode: %v", inv["env_mode"])
+	if inv["env_mode"] != "isolated" {
+		t.Fatalf("env_mode: got %v want isolated", inv["env_mode"])
 	}
-	al, ok := inv["env_allowlist"].([]any)
-	if !ok || len(al) != 1 || strings.TrimSpace(anyToString(al[0])) != "*" {
-		t.Fatalf("env_allowlist: %#v", inv["env_allowlist"])
+	if strings.TrimSpace(anyToString(inv["env_scope"])) != "codex" {
+		t.Fatalf("env_scope: %#v", inv["env_scope"])
+	}
+	stateRoot := strings.TrimSpace(anyToString(inv["state_root"]))
+	if stateRoot == "" {
+		t.Fatalf("state_root missing: %#v", inv)
+	}
+	assertExists(t, filepath.Join(stateRoot, "auth.json"))
+	assertExists(t, filepath.Join(stateRoot, "config.toml"))
+	if strings.HasPrefix(stateRoot, filepath.Clean(res.LogsRoot)+string(filepath.Separator)) || stateRoot == filepath.Clean(res.LogsRoot) {
+		t.Fatalf("state_root should be outside logs root: logs_root=%q state_root=%q", res.LogsRoot, stateRoot)
 	}
 	if strings.TrimSpace(anyToString(inv["working_dir"])) == "" {
 		t.Fatalf("working_dir missing in invocation: %#v", inv["working_dir"])
@@ -481,4 +507,48 @@ func writePinnedCatalog(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return pinned
+}
+
+func listTarGzEntries(t *testing.T, tarPath string) []string {
+	t.Helper()
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar %s: %v", tarPath, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip reader %s: %v", tarPath, err)
+	}
+	defer func() { _ = gz.Close() }()
+
+	tr := tar.NewReader(gz)
+	entries := []string{}
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return entries
+		}
+		if err != nil {
+			t.Fatalf("tar read %s: %v", tarPath, err)
+		}
+		entries = append(entries, h.Name)
+	}
+}
+
+func assertNoCodexStateEntries(t *testing.T, entries []string) {
+	t.Helper()
+	for _, name := range entries {
+		n := filepath.ToSlash(strings.TrimSpace(name))
+		if strings.HasPrefix(n, "codex-home/") || n == "codex-home" {
+			t.Fatalf("unexpected codex state entry in tar: %q", name)
+		}
+		if strings.Contains(n, "/codex-home/") || strings.HasSuffix(n, "/codex-home") {
+			t.Fatalf("unexpected codex state entry in tar: %q", name)
+		}
+		if strings.HasSuffix(n, "/.codex/auth.json") || strings.HasSuffix(n, "/.codex/config.toml") {
+			t.Fatalf("unexpected codex credential entry in tar: %q", name)
+		}
+	}
 }

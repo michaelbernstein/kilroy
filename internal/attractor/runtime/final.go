@@ -22,6 +22,7 @@ type FinalOutcome struct {
 	RunID string `json:"run_id"`
 
 	FinalGitCommitSHA string `json:"final_git_commit_sha"`
+	FailureReason     string `json:"failure_reason,omitempty"`
 
 	CXDBContextID  string `json:"cxdb_context_id"`
 	CXDBHeadTurnID string `json:"cxdb_head_turn_id"`

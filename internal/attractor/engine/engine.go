@@ -103,9 +103,12 @@ type Engine struct {
 	Warnings   []string
 
 	// loop_restart state (attractor-spec §3.2 Step 7).
-	restartCount int
-	baseLogsRoot string // original LogsRoot before any restarts
-	baseSHA      string // HEAD SHA at run start, needed for restart manifests
+	restartCount             int
+	baseLogsRoot             string         // original LogsRoot before any restarts
+	baseSHA                  string         // HEAD SHA at run start, needed for restart manifests
+	restartFailureSignatures map[string]int // signature -> count across loop restarts
+	lastCheckpointSHA        string
+	terminalOutcomePersisted bool
 
 	progressMu sync.Mutex
 
@@ -221,23 +224,19 @@ func Run(ctx context.Context, dotSource []byte, opts RunOptions) (*Result, error
 		return nil, err
 	}
 
-	eng := &Engine{
-		Graph:           g,
-		Options:         opts,
-		DotSource:       append([]byte{}, dotSource...),
-		LogsRoot:        opts.LogsRoot,
-		WorktreeDir:     opts.WorktreeDir,
-		Context:         runtime.NewContext(),
-		Registry:        NewDefaultRegistry(),
-		Interviewer:     &AutoApproveInterviewer{},
-		CodergenBackend: &SimulatedCodergenBackend{},
-	}
-	eng.RunBranch = fmt.Sprintf("%s/%s", opts.RunBranchPrefix, opts.RunID)
+	eng := newBaseEngine(g, dotSource, opts)
+	eng.CodergenBackend = &SimulatedCodergenBackend{}
 
 	return eng.run(ctx)
 }
 
-func (e *Engine) run(ctx context.Context) (*Result, error) {
+func (e *Engine) run(ctx context.Context) (res *Result, err error) {
+	defer func() {
+		if err != nil {
+			e.persistFatalOutcome(ctx, err)
+		}
+	}()
+
 	if e.Options.RepoPath == "" {
 		return nil, fmt.Errorf("repo.path is required")
 	}
@@ -370,6 +369,7 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 			if err != nil {
 				return nil, err
 			}
+			e.lastCheckpointSHA = sha
 			e.cxdbCheckpointSaved(ctx, node.ID, out.Status, sha)
 			completionTurnID, err := e.cxdbRunCompleted(ctx, sha)
 			if err != nil {
@@ -383,27 +383,7 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 				CXDBContextID:     cxdbContextID(e.CXDB),
 				CXDBHeadTurnID:    completionTurnID,
 			}
-			finalPath := filepath.Join(e.LogsRoot, "final.json")
-			_ = final.Save(finalPath)
-			if e.CXDB != nil {
-				_, _ = e.CXDB.PutArtifactFile(ctx, "", "final.json", finalPath)
-			}
-			// Convenience tarball (metaspec SHOULD): run.tgz excluding worktree/.
-			runTar := filepath.Join(e.LogsRoot, "run.tgz")
-			_ = writeTarGz(runTar, e.LogsRoot, func(rel string, d os.DirEntry) bool {
-				if rel == "run.tgz" || rel == "run.tgz.tmp" {
-					return false
-				}
-				if rel == "worktree" || strings.HasPrefix(rel, "worktree/") {
-					return false
-				}
-				return true
-			})
-			if e.CXDB != nil {
-				if _, err := os.Stat(runTar); err == nil {
-					_, _ = e.CXDB.PutArtifactFile(ctx, "", "run.tgz", runTar)
-				}
-			}
+			e.persistTerminalOutcome(ctx, final)
 			return &Result{
 				RunID:          e.Options.RunID,
 				LogsRoot:       e.LogsRoot,
@@ -431,12 +411,15 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 		e.Context.Set("outcome", string(out.Status))
 		e.Context.Set("preferred_label", out.PreferredLabel)
 		e.Context.Set("failure_reason", out.FailureReason)
+		failureClass := classifyFailureClass(out)
+		e.Context.Set("failure_class", failureClass)
 
 		// Checkpoint (git commit + checkpoint.json).
 		sha, err := e.checkpoint(node.ID, out, completed, nodeRetries)
 		if err != nil {
 			return nil, err
 		}
+		e.lastCheckpointSHA = sha
 		e.cxdbCheckpointSaved(ctx, node.ID, out.Status, sha)
 
 		// Kilroy v1: parallel nodes control the next hop (join node) via context.
@@ -464,29 +447,11 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 					Status:            runtime.FinalFail,
 					RunID:             e.Options.RunID,
 					FinalGitCommitSHA: sha,
+					FailureReason:     out.FailureReason,
 					CXDBContextID:     cxdbContextID(e.CXDB),
 					CXDBHeadTurnID:    failedTurnID,
 				}
-				finalPath := filepath.Join(e.LogsRoot, "final.json")
-				_ = final.Save(finalPath)
-				if e.CXDB != nil {
-					_, _ = e.CXDB.PutArtifactFile(ctx, "", "final.json", finalPath)
-				}
-				runTar := filepath.Join(e.LogsRoot, "run.tgz")
-				_ = writeTarGz(runTar, e.LogsRoot, func(rel string, d os.DirEntry) bool {
-					if rel == "run.tgz" || rel == "run.tgz.tmp" {
-						return false
-					}
-					if rel == "worktree" || strings.HasPrefix(rel, "worktree/") {
-						return false
-					}
-					return true
-				})
-				if e.CXDB != nil {
-					if _, err := os.Stat(runTar); err == nil {
-						_, _ = e.CXDB.PutArtifactFile(ctx, "", "run.tgz", runTar)
-					}
-				}
+				e.persistTerminalOutcome(ctx, final)
 				return nil, fmt.Errorf("stage failed with no outgoing fail edge: %s", out.FailureReason)
 			}
 			completionTurnID, err := e.cxdbRunCompleted(ctx, sha)
@@ -501,26 +466,7 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 				CXDBContextID:     cxdbContextID(e.CXDB),
 				CXDBHeadTurnID:    completionTurnID,
 			}
-			finalPath := filepath.Join(e.LogsRoot, "final.json")
-			_ = final.Save(finalPath)
-			if e.CXDB != nil {
-				_, _ = e.CXDB.PutArtifactFile(ctx, "", "final.json", finalPath)
-			}
-			runTar := filepath.Join(e.LogsRoot, "run.tgz")
-			_ = writeTarGz(runTar, e.LogsRoot, func(rel string, d os.DirEntry) bool {
-				if rel == "run.tgz" || rel == "run.tgz.tmp" {
-					return false
-				}
-				if rel == "worktree" || strings.HasPrefix(rel, "worktree/") {
-					return false
-				}
-				return true
-			})
-			if e.CXDB != nil {
-				if _, err := os.Stat(runTar); err == nil {
-					_, _ = e.CXDB.PutArtifactFile(ctx, "", "run.tgz", runTar)
-				}
-			}
+			e.persistTerminalOutcome(ctx, final)
 			return &Result{
 				RunID:          e.Options.RunID,
 				LogsRoot:       e.LogsRoot,
@@ -542,7 +488,7 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 		// loop_restart (attractor-spec §3.2 Step 7): terminate current run, re-launch
 		// with a fresh log directory starting at the edge's target node.
 		if strings.EqualFold(next.Attr("loop_restart", "false"), "true") {
-			return e.loopRestart(ctx, next.To)
+			return e.loopRestart(ctx, next.To, node.ID, out, failureClass)
 		}
 		e.incomingEdge = next
 		current = next.To
@@ -552,7 +498,70 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 // loopRestart implements attractor-spec §3.2 Step 7: terminate the current run iteration
 // and re-launch with a fresh log directory, starting at the given target node.
 // The worktree is preserved (code changes carry over); only per-node log directories are fresh.
-func (e *Engine) loopRestart(ctx context.Context, targetNodeID string) (*Result, error) {
+func (e *Engine) loopRestart(ctx context.Context, targetNodeID string, fromNodeID string, out runtime.Outcome, failureClass string) (*Result, error) {
+	if strings.TrimSpace(e.baseLogsRoot) == "" {
+		return nil, fmt.Errorf("loop_restart: base logs root is empty (resume invariants not restored)")
+	}
+
+	if isFailureLoopRestartOutcome(out) {
+		if !strings.EqualFold(strings.TrimSpace(failureClass), failureClassTransientInfra) {
+			reason := fmt.Sprintf(
+				"loop_restart blocked: failure_class=%s (requires %s), node=%s, failure_reason=%s",
+				normalizedFailureClassOrDefault(failureClass),
+				failureClassTransientInfra,
+				strings.TrimSpace(fromNodeID),
+				strings.TrimSpace(out.FailureReason),
+			)
+			e.appendProgress(map[string]any{
+				"event":          "loop_restart_blocked",
+				"target_node":    targetNodeID,
+				"node_id":        fromNodeID,
+				"failure_class":  normalizedFailureClassOrDefault(failureClass),
+				"failure_reason": out.FailureReason,
+			})
+			return nil, fmt.Errorf("%s", reason)
+		}
+
+		signature := restartFailureSignature(fromNodeID, out, failureClass)
+		if signature != "" {
+			if e.restartFailureSignatures == nil {
+				e.restartFailureSignatures = map[string]int{}
+			}
+			e.restartFailureSignatures[signature]++
+			count := e.restartFailureSignatures[signature]
+			limit := loopRestartSignatureLimit(e.Graph)
+			e.appendProgress(map[string]any{
+				"event":             "loop_restart_signature",
+				"target_node":       targetNodeID,
+				"node_id":           fromNodeID,
+				"signature":         signature,
+				"signature_count":   count,
+				"signature_limit":   limit,
+				"failure_reason":    out.FailureReason,
+				"failure_class":     normalizedFailureClassOrDefault(failureClass),
+				"restart_count":     e.restartCount,
+				"current_logs_root": e.LogsRoot,
+			})
+			if count >= limit {
+				reason := fmt.Sprintf(
+					"loop_restart circuit breaker: failure signature repeated %d times (limit %d): %s",
+					count,
+					limit,
+					signature,
+				)
+				e.appendProgress(map[string]any{
+					"event":           "loop_restart_circuit_breaker",
+					"target_node":     targetNodeID,
+					"node_id":         fromNodeID,
+					"signature":       signature,
+					"signature_count": count,
+					"signature_limit": limit,
+				})
+				return nil, fmt.Errorf("%s", reason)
+			}
+		}
+	}
+
 	e.restartCount++
 	maxRestarts := parseInt(e.Graph.Attrs["max_restarts"], 50)
 	if e.restartCount > maxRestarts {
@@ -740,8 +749,19 @@ func (e *Engine) executeWithRetry(ctx context.Context, node *model.Node, retries
 			retries[node.ID] = 0
 			return out, nil
 		}
-		// FAIL and RETRY both participate in retry policy (spec DoD expects this).
+
+		failureClass := classifyFailureClass(out)
+		hintProvided := strings.TrimSpace(readFailureClassHint(out)) != ""
+		canRetry := false
 		if attempt < maxAttempts {
+			if hintProvided {
+				canRetry = shouldRetryOutcome(out, failureClass)
+			} else {
+				// Preserve existing retry behavior for unclassified stage outcomes.
+				canRetry = out.Status == runtime.StatusFail || out.Status == runtime.StatusRetry
+			}
+		}
+		if canRetry {
 			retries[node.ID]++
 			delay := backoffDelayForNode(e.Options.RunID, e.Graph, node, attempt)
 			e.appendProgress(map[string]any{
@@ -754,6 +774,18 @@ func (e *Engine) executeWithRetry(ctx context.Context, node *model.Node, retries
 			})
 			time.Sleep(delay)
 			continue
+		}
+		if hintProvided && attempt < maxAttempts && (out.Status == runtime.StatusFail || out.Status == runtime.StatusRetry) {
+			e.appendProgress(map[string]any{
+				"event":          "stage_retry_blocked",
+				"node_id":        node.ID,
+				"attempt":        attempt,
+				"max":            maxAttempts,
+				"status":         string(out.Status),
+				"failure_reason": out.FailureReason,
+				"failure_class":  failureClass,
+				"max_retry":      maxRetries,
+			})
 		}
 		if allowPartial {
 			po, _ := (runtime.Outcome{
@@ -808,10 +840,15 @@ func (e *Engine) checkpoint(nodeID string, out runtime.Outcome, completed []stri
 	cp.ContextValues = e.Context.SnapshotValues()
 	cp.Logs = e.Context.SnapshotLogs()
 	cp.GitCommitSHA = sha
+	if cp.Extra == nil {
+		cp.Extra = map[string]any{}
+	}
+	cp.Extra["base_logs_root"] = e.baseLogsRoot
+	cp.Extra["restart_count"] = e.restartCount
+	if len(e.restartFailureSignatures) > 0 {
+		cp.Extra["restart_failure_signatures"] = copyStringIntMap(e.restartFailureSignatures)
+	}
 	if strings.TrimSpace(e.lastResolvedFidelity) != "" {
-		if cp.Extra == nil {
-			cp.Extra = map[string]any{}
-		}
 		cp.Extra["last_fidelity"] = e.lastResolvedFidelity
 		if strings.TrimSpace(e.lastResolvedThreadKey) != "" {
 			cp.Extra["last_thread_key"] = e.lastResolvedThreadKey
@@ -863,6 +900,121 @@ func (e *Engine) writeManifest(baseSHA string) error {
 		manifest["warnings"] = ws
 	}
 	return writeJSON(filepath.Join(e.LogsRoot, "manifest.json"), manifest)
+}
+
+func (e *Engine) persistFatalOutcome(ctx context.Context, runErr error) {
+	if e == nil || runErr == nil || e.terminalOutcomePersisted {
+		return
+	}
+
+	reason := strings.TrimSpace(runErr.Error())
+	nodeID := ""
+	if e.Context != nil {
+		nodeID = strings.TrimSpace(e.Context.GetString("current_node", ""))
+	}
+	sha := strings.TrimSpace(e.lastCheckpointSHA)
+	if sha == "" {
+		if wt := strings.TrimSpace(e.WorktreeDir); wt != "" {
+			if got, err := gitutil.HeadSHA(wt); err == nil {
+				sha = strings.TrimSpace(got)
+			}
+		}
+	}
+	if sha == "" {
+		sha = strings.TrimSpace(e.baseSHA)
+	}
+
+	failedTurnID, _ := e.cxdbRunFailed(ctx, nodeID, sha, reason)
+	final := runtime.FinalOutcome{
+		Timestamp:         time.Now().UTC(),
+		Status:            runtime.FinalFail,
+		RunID:             e.Options.RunID,
+		FinalGitCommitSHA: sha,
+		FailureReason:     reason,
+		CXDBContextID:     cxdbContextID(e.CXDB),
+		CXDBHeadTurnID:    strings.TrimSpace(failedTurnID),
+	}
+	if final.CXDBHeadTurnID == "" && e.CXDB != nil {
+		final.CXDBHeadTurnID = strings.TrimSpace(e.CXDB.HeadTurnID)
+	}
+	e.persistTerminalOutcome(ctx, final)
+}
+
+func (e *Engine) persistTerminalOutcome(ctx context.Context, final runtime.FinalOutcome) {
+	if e == nil || e.terminalOutcomePersisted {
+		return
+	}
+	if final.Timestamp.IsZero() {
+		final.Timestamp = time.Now().UTC()
+	}
+	if strings.TrimSpace(final.RunID) == "" {
+		final.RunID = strings.TrimSpace(e.Options.RunID)
+	}
+	if strings.TrimSpace(final.CXDBContextID) == "" {
+		final.CXDBContextID = cxdbContextID(e.CXDB)
+	}
+	if strings.TrimSpace(final.CXDBHeadTurnID) == "" && e.CXDB != nil {
+		final.CXDBHeadTurnID = strings.TrimSpace(e.CXDB.HeadTurnID)
+	}
+
+	primaryPath := ""
+	for _, p := range e.finalOutcomePaths() {
+		if err := final.Save(p); err != nil {
+			continue
+		}
+		if primaryPath == "" {
+			primaryPath = p
+		}
+	}
+	if primaryPath == "" {
+		root := strings.TrimSpace(e.LogsRoot)
+		if root == "" {
+			root = strings.TrimSpace(e.baseLogsRoot)
+		}
+		if root != "" {
+			primaryPath = filepath.Join(root, "final.json")
+			_ = final.Save(primaryPath)
+		}
+	}
+	if e.CXDB != nil && strings.TrimSpace(primaryPath) != "" {
+		_, _ = e.CXDB.PutArtifactFile(ctx, "", "final.json", primaryPath)
+	}
+
+	archiveRoot := strings.TrimSpace(e.LogsRoot)
+	if archiveRoot != "" {
+		runTar := filepath.Join(archiveRoot, "run.tgz")
+		_ = writeTarGz(runTar, archiveRoot, includeInRunArchive)
+		if e.CXDB != nil {
+			if _, err := os.Stat(runTar); err == nil {
+				_, _ = e.CXDB.PutArtifactFile(ctx, "", "run.tgz", runTar)
+			}
+		}
+	}
+
+	e.terminalOutcomePersisted = true
+}
+
+func (e *Engine) finalOutcomePaths() []string {
+	if e == nil {
+		return nil
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(root string) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
+		}
+		p := filepath.Clean(filepath.Join(root, "final.json"))
+		if seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	add(e.LogsRoot)
+	add(e.baseLogsRoot)
+	return out
 }
 
 func writeJSON(path string, v any) error {

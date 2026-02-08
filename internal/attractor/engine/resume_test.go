@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,102 @@ import (
 
 	"github.com/strongdm/kilroy/internal/attractor/runtime"
 )
+
+func TestResume_EngineOptionsAreFullyHydrated(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	repo := t.TempDir()
+	runCmd(t, repo, "git", "init")
+	runCmd(t, repo, "git", "config", "user.name", "tester")
+	runCmd(t, repo, "git", "config", "user.email", "tester@example.com")
+	_ = os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644)
+	runCmd(t, repo, "git", "add", "-A")
+	runCmd(t, repo, "git", "commit", "-m", "init")
+
+	dot := []byte(`
+digraph P {
+  graph [goal="hydrate"]
+  start [shape=Mdiamond]
+  par [shape=component]
+  a [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="a"]
+  b [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="b"]
+  join [shape=tripleoctagon]
+  exit [shape=Msquare]
+  start -> par
+  par -> a
+  par -> b
+  a -> join
+  b -> join
+  join -> exit
+}
+`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	res, err := Run(ctx, dot, RunOptions{RepoPath: repo, RunBranchPrefix: "custom/prefix"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	cpPath := filepath.Join(res.LogsRoot, "checkpoint.json")
+	cp, err := runtime.LoadCheckpoint(cpPath)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint: %v", err)
+	}
+	cp.CurrentNode = "start"
+	cp.CompletedNodes = []string{"start"}
+	if err := cp.Save(cpPath); err != nil {
+		t.Fatalf("Save checkpoint: %v", err)
+	}
+
+	res2, err := Resume(ctx, res.LogsRoot)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	wantBranch := "custom/prefix/" + res.RunID
+	if strings.TrimSpace(res2.RunBranch) != wantBranch {
+		t.Fatalf("resumed run branch: got %q want %q", res2.RunBranch, wantBranch)
+	}
+
+	manifestBytes, err := os.ReadFile(filepath.Join(res.LogsRoot, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if !filepath.IsAbs(strings.TrimSpace(anyToString(manifest["logs_root"]))) {
+		t.Fatalf("manifest logs_root should be absolute, got %q", anyToString(manifest["logs_root"]))
+	}
+	if !filepath.IsAbs(strings.TrimSpace(anyToString(manifest["worktree"]))) {
+		t.Fatalf("manifest worktree should be absolute, got %q", anyToString(manifest["worktree"]))
+	}
+
+	latestCP, err := runtime.LoadCheckpoint(cpPath)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint latest: %v", err)
+	}
+	if strings.TrimSpace(anyToString(latestCP.Extra["base_logs_root"])) == "" {
+		t.Fatalf("checkpoint extra missing base_logs_root")
+	}
+
+	resultsBytes, err := os.ReadFile(filepath.Join(res.LogsRoot, "par", "parallel_results.json"))
+	if err != nil {
+		t.Fatalf("read parallel results: %v", err)
+	}
+	var results []map[string]any
+	if err := json.Unmarshal(resultsBytes, &results); err != nil {
+		t.Fatalf("unmarshal parallel results: %v", err)
+	}
+	for _, row := range results {
+		branchName := strings.TrimSpace(anyToString(row["branch_name"]))
+		if !strings.HasPrefix(branchName, "custom/prefix/parallel/") {
+			t.Fatalf("parallel branch not hydrated from options: %q", branchName)
+		}
+	}
+}
 
 func TestResume_FromCheckpoint_RewindsBranchAndContinues(t *testing.T) {
 	// Keep logs under the test tempdir so ResumeFromBranch/guessing is deterministic.
@@ -126,4 +223,3 @@ digraph G {
 		t.Fatalf("run_id: got %q want %q", res2.RunID, res.RunID)
 	}
 }
-

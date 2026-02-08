@@ -6,13 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/strongdm/kilroy/internal/attractor/gitutil"
 	"github.com/strongdm/kilroy/internal/attractor/modeldb"
 	"github.com/strongdm/kilroy/internal/attractor/runtime"
 	"github.com/strongdm/kilroy/internal/cxdb"
 )
+
+var restartSuffixRE = regexp.MustCompile(`^restart-(\d+)$`)
 
 type manifest struct {
 	RunID         string `json:"run_id"`
@@ -49,15 +54,56 @@ func Resume(ctx context.Context, logsRoot string) (*Result, error) {
 	return resumeFromLogsRoot(ctx, logsRoot, ResumeOverrides{})
 }
 
-func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides) (*Result, error) {
+func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides) (res *Result, err error) {
+	logsRoot = strings.TrimSpace(logsRoot)
+	if logsRoot == "" {
+		return nil, fmt.Errorf("logs_root is required")
+	}
+	if absLogsRoot, absErr := filepath.Abs(logsRoot); absErr != nil {
+		return nil, absErr
+	} else {
+		logsRoot = absLogsRoot
+	}
+
+	var (
+		runID         string
+		checkpointSHA string
+		eng           *Engine
+	)
+	defer func() {
+		if err == nil {
+			return
+		}
+		if eng != nil {
+			eng.persistFatalOutcome(ctx, err)
+			return
+		}
+		if strings.TrimSpace(logsRoot) == "" || strings.TrimSpace(runID) == "" {
+			return
+		}
+		final := runtime.FinalOutcome{
+			Timestamp:         time.Now().UTC(),
+			Status:            runtime.FinalFail,
+			RunID:             runID,
+			FinalGitCommitSHA: strings.TrimSpace(checkpointSHA),
+			FailureReason:     strings.TrimSpace(err.Error()),
+		}
+		_ = final.Save(filepath.Join(logsRoot, "final.json"))
+	}()
+
 	m, err := loadManifest(filepath.Join(logsRoot, "manifest.json"))
 	if err != nil {
 		return nil, err
 	}
+	runID = strings.TrimSpace(m.RunID)
 	cp, err := runtime.LoadCheckpoint(filepath.Join(logsRoot, "checkpoint.json"))
 	if err != nil {
 		return nil, err
 	}
+	if err := validateAbsoluteResumePaths(logsRoot, cp); err != nil {
+		return nil, err
+	}
+	checkpointSHA = strings.TrimSpace(cp.GitCommitSHA)
 	if strings.TrimSpace(cp.GitCommitSHA) == "" {
 		return nil, fmt.Errorf("checkpoint missing git_commit_sha")
 	}
@@ -139,43 +185,48 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 		}
 	}
 
-	eng := &Engine{
-		Graph: g,
-		Options: RunOptions{
-			RepoPath: m.RepoPath,
-			RunID:    m.RunID,
-			LogsRoot: logsRoot,
-		},
-		DotSource:       dotSource,
-		RunConfig:       cfg,
-		RunBranch:       m.RunBranch,
+	prefix := deriveRunBranchPrefix(m, cfg)
+	opts := RunOptions{
+		RepoPath:        m.RepoPath,
+		RunID:           m.RunID,
 		LogsRoot:        logsRoot,
 		WorktreeDir:     filepath.Join(logsRoot, "worktree"),
-		Context:         runtime.NewContext(),
-		Registry:        NewDefaultRegistry(),
-		Interviewer:     &AutoApproveInterviewer{},
-		CodergenBackend: backend,
-		CXDB:            sink,
-		ModelCatalogSHA: func() string {
-			if catalog == nil {
-				return ""
-			}
-			return catalog.SHA256
-		}(),
-		ModelCatalogSource: m.ModelDB.LiteLLMCatalogSource,
-		ModelCatalogPath: func() string {
-			if catalog == nil {
-				return ""
-			}
-			return catalog.Path
-		}(),
+		RunBranchPrefix: prefix,
+		RequireClean:    true,
 	}
+	if err := opts.applyDefaults(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(prefix) == "" {
+		return nil, fmt.Errorf("resume: unable to derive run_branch_prefix from manifest/config")
+	}
+	eng = newBaseEngine(g, dotSource, opts)
+	eng.RunConfig = cfg
+	eng.CodergenBackend = backend
+	eng.CXDB = sink
+	eng.ModelCatalogSHA = func() string {
+		if catalog == nil {
+			return ""
+		}
+		return catalog.SHA256
+	}()
+	eng.ModelCatalogSource = m.ModelDB.LiteLLMCatalogSource
+	eng.ModelCatalogPath = func() string {
+		if catalog == nil {
+			return ""
+		}
+		return catalog.Path
+	}()
 	if startup != nil {
 		for _, w := range startup.Warnings {
 			eng.Warn(w)
 		}
 	}
 	eng.Context.ReplaceSnapshot(cp.ContextValues, cp.Logs)
+	eng.baseLogsRoot, eng.restartCount = restoreRestartState(logsRoot, cp)
+	eng.restartFailureSignatures = restoreRestartFailureSignatures(cp)
+	eng.baseSHA = cp.GitCommitSHA
+	eng.lastCheckpointSHA = cp.GitCommitSHA
 	if cp != nil && cp.Extra != nil {
 		// Metaspec/attractor-spec: if the previous hop used `full` fidelity, degrade to
 		// summary:high for the first resumed node unless exact session restore is supported.
@@ -305,4 +356,141 @@ func loadManifest(path string) (*manifest, error) {
 		return nil, fmt.Errorf("manifest missing required fields")
 	}
 	return &m, nil
+}
+
+func deriveRunBranchPrefix(m *manifest, cfg *RunConfigFile) string {
+	if cfg != nil {
+		if p := strings.TrimSpace(cfg.Git.RunBranchPrefix); p != "" {
+			return p
+		}
+	}
+	if m == nil {
+		return ""
+	}
+	rb := strings.TrimSpace(m.RunBranch)
+	rid := strings.TrimSpace(m.RunID)
+	if rb != "" && rid != "" {
+		suffix := "/" + rid
+		if strings.HasSuffix(rb, suffix) {
+			return strings.TrimSuffix(rb, suffix)
+		}
+	}
+	return ""
+}
+
+func validateAbsoluteResumePaths(logsRoot string, cp *runtime.Checkpoint) error {
+	if root := strings.TrimSpace(logsRoot); root != "" && !filepath.IsAbs(root) {
+		return fmt.Errorf("resume: logs_root must be absolute: %s", root)
+	}
+	if cp == nil || cp.Extra == nil {
+		return nil
+	}
+	if raw, ok := cp.Extra["base_logs_root"]; ok {
+		if base := strings.TrimSpace(anyToStringValue(raw)); base != "" && !filepath.IsAbs(base) {
+			return fmt.Errorf("resume: checkpoint base_logs_root must be absolute: %s", base)
+		}
+	}
+	return nil
+}
+
+func restoreRestartState(logsRoot string, cp *runtime.Checkpoint) (string, int) {
+	base := strings.TrimSpace(logsRoot)
+	restarts := 0
+	if cp != nil && cp.Extra != nil {
+		if raw, ok := cp.Extra["base_logs_root"]; ok {
+			if v := strings.TrimSpace(anyToStringValue(raw)); v != "" {
+				base = v
+			}
+		}
+		if raw, ok := cp.Extra["restart_count"]; ok {
+			if n, ok := anyToNonNegativeInt(raw); ok {
+				restarts = n
+			}
+		}
+	}
+	if m := restartSuffixRE.FindStringSubmatch(filepath.Base(logsRoot)); len(m) == 2 {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			if restarts == 0 || n > restarts {
+				restarts = n
+			}
+			if base == logsRoot {
+				base = filepath.Dir(logsRoot)
+			}
+		}
+	}
+	return base, restarts
+}
+
+func restoreRestartFailureSignatures(cp *runtime.Checkpoint) map[string]int {
+	out := map[string]int{}
+	if cp == nil || cp.Extra == nil {
+		return out
+	}
+	raw, ok := cp.Extra["restart_failure_signatures"]
+	if !ok || raw == nil {
+		return out
+	}
+	switch m := raw.(type) {
+	case map[string]int:
+		for k, v := range m {
+			if strings.TrimSpace(k) == "" || v < 0 {
+				continue
+			}
+			out[strings.TrimSpace(k)] = v
+		}
+	case map[string]any:
+		for k, v := range m {
+			if strings.TrimSpace(k) == "" {
+				continue
+			}
+			if n, ok := anyToNonNegativeInt(v); ok {
+				out[strings.TrimSpace(k)] = n
+			}
+		}
+	}
+	return out
+}
+
+func anyToStringValue(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	default:
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "<nil>" {
+			return ""
+		}
+		return s
+	}
+}
+
+func anyToNonNegativeInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		if n >= 0 {
+			return n, true
+		}
+	case int64:
+		if n >= 0 {
+			return int(n), true
+		}
+	case float64:
+		if n >= 0 && n == float64(int(n)) {
+			return int(n), true
+		}
+	case string:
+		if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil && i >= 0 {
+			return i, true
+		}
+	default:
+		if s := strings.TrimSpace(fmt.Sprint(v)); s != "" && s != "<nil>" {
+			if i, err := strconv.Atoi(s); err == nil && i >= 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
 }

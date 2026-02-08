@@ -3,10 +3,12 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/strongdm/kilroy/internal/attractor/model"
 	"github.com/strongdm/kilroy/internal/attractor/modeldb"
 	"github.com/strongdm/kilroy/internal/cxdb"
 )
@@ -82,6 +84,23 @@ func RunWithConfig(ctx context.Context, dotSource []byte, cfg *RunConfigFile, ov
 	if err != nil {
 		return nil, err
 	}
+	if err := validateProviderModelPairs(g, cfg, catalog); err != nil {
+		report := &providerPreflightReport{
+			GeneratedAt:         time.Now().UTC().Format(time.RFC3339Nano),
+			StrictCapabilities:  parseBool(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_STRICT_CAPABILITIES")), false),
+			CapabilityProbeMode: capabilityProbeMode(),
+		}
+		report.addCheck(providerPreflightCheck{
+			Name:    "provider_model_catalog",
+			Status:  preflightStatusFail,
+			Message: err.Error(),
+		})
+		_ = writePreflightReport(opts.LogsRoot, report)
+		return nil, err
+	}
+	if _, err := runProviderCLIPreflight(ctx, g, cfg, opts); err != nil {
+		return nil, err
+	}
 
 	// CXDB is required in v1 and must be reachable.
 	cxdbClient, bin, startup, err := ensureCXDBReady(ctx, cfg, opts.LogsRoot, opts.RunID)
@@ -105,22 +124,14 @@ func RunWithConfig(ctx context.Context, dotSource []byte, cfg *RunConfigFile, ov
 	}
 	sink := NewCXDBSink(cxdbClient, bin, opts.RunID, ci.ContextID, ci.HeadTurnID, bundleID)
 
-	eng := &Engine{
-		Graph:              g,
-		Options:            opts,
-		DotSource:          append([]byte{}, dotSource...),
-		RunConfig:          cfg,
-		LogsRoot:           opts.LogsRoot,
-		WorktreeDir:        opts.WorktreeDir,
-		Context:            NewContextWithGraphAttrs(g),
-		Registry:           NewDefaultRegistry(),
-		Interviewer:        &AutoApproveInterviewer{},
-		CodergenBackend:    NewCodergenRouter(cfg, catalog),
-		CXDB:               sink,
-		ModelCatalogSHA:    catalog.SHA256,
-		ModelCatalogSource: resolved.Source,
-		ModelCatalogPath:   resolved.SnapshotPath,
-	}
+	eng := newBaseEngine(g, dotSource, opts)
+	eng.RunConfig = cfg
+	eng.Context = NewContextWithGraphAttrs(g)
+	eng.CodergenBackend = NewCodergenRouter(cfg, catalog)
+	eng.CXDB = sink
+	eng.ModelCatalogSHA = catalog.SHA256
+	eng.ModelCatalogSource = resolved.Source
+	eng.ModelCatalogPath = resolved.SnapshotPath
 	if strings.TrimSpace(resolved.Warning) != "" {
 		eng.Warn(resolved.Warning)
 		eng.Context.AppendLog(resolved.Warning)
@@ -130,7 +141,6 @@ func RunWithConfig(ctx context.Context, dotSource []byte, cfg *RunConfigFile, ov
 			eng.Warn(w)
 		}
 	}
-	eng.RunBranch = fmt.Sprintf("%s/%s", opts.RunBranchPrefix, opts.RunID)
 
 	res, err := eng.run(ctx)
 	if err != nil {
@@ -143,16 +153,44 @@ func RunWithConfig(ctx context.Context, dotSource []byte, cfg *RunConfigFile, ov
 }
 
 func hasProviderBackend(cfg *RunConfigFile, provider string) bool {
+	backend := backendFor(cfg, provider)
+	return backend == BackendAPI || backend == BackendCLI
+}
+
+func backendFor(cfg *RunConfigFile, provider string) BackendKind {
 	if cfg == nil {
-		return false
+		return ""
 	}
 	for k, v := range cfg.LLM.Providers {
 		if normalizeProviderKey(k) != provider {
 			continue
 		}
-		return v.Backend == BackendAPI || v.Backend == BackendCLI
+		return v.Backend
 	}
-	return false
+	return ""
+}
+
+func validateProviderModelPairs(g *model.Graph, cfg *RunConfigFile, catalog *modeldb.LiteLLMCatalog) error {
+	if g == nil || cfg == nil || catalog == nil {
+		return nil
+	}
+	for _, n := range g.Nodes {
+		if n == nil || n.Shape() != "box" {
+			continue
+		}
+		provider := normalizeProviderKey(n.Attr("llm_provider", ""))
+		modelID := strings.TrimSpace(n.Attr("llm_model", ""))
+		if provider == "" || modelID == "" {
+			continue
+		}
+		if backendFor(cfg, provider) != BackendCLI {
+			continue
+		}
+		if !catalogHasProviderModel(catalog, provider, modelID) {
+			return fmt.Errorf("preflight: llm_provider=%s backend=cli model=%s not present in run catalog", provider, modelID)
+		}
+	}
+	return nil
 }
 
 func createContextWithFallback(ctx context.Context, client *cxdb.Client, bin *cxdb.BinaryClient) (cxdb.ContextInfo, error) {

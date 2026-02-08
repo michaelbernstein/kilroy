@@ -26,7 +26,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  kilroy attractor run --graph <file.dot> --config <run.yaml> [--run-id <id>] [--logs-root <dir>]")
+	fmt.Fprintln(os.Stderr, "  kilroy attractor run [--detach] --graph <file.dot> --config <run.yaml> [--run-id <id>] [--logs-root <dir>]")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --logs-root <dir>")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --cxdb <http_base_url> --context-id <id>")
 	fmt.Fprintln(os.Stderr, "  kilroy attractor resume --run-branch <attractor/run/...> [--repo <path>]")
@@ -59,9 +59,12 @@ func attractorRun(args []string) {
 	var configPath string
 	var runID string
 	var logsRoot string
+	var detach bool
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--detach":
+			detach = true
 		case "--graph":
 			i++
 			if i >= len(args) {
@@ -99,6 +102,40 @@ func attractorRun(args []string) {
 	if graphPath == "" || configPath == "" {
 		usage()
 		os.Exit(1)
+	}
+
+	if detach {
+		if runID == "" {
+			id, err := engine.NewRunID()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			runID = id
+		}
+		if logsRoot == "" {
+			root, err := defaultDetachedLogsRoot(runID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			logsRoot = root
+		}
+
+		childArgs := []string{"attractor", "run", "--graph", graphPath, "--config", configPath}
+		if runID != "" {
+			childArgs = append(childArgs, "--run-id", runID)
+		}
+		if logsRoot != "" {
+			childArgs = append(childArgs, "--logs-root", logsRoot)
+		}
+
+		if err := launchDetached(childArgs, logsRoot); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("detached=true\nlogs_root=%s\npid_file=%s\n", logsRoot, filepath.Join(logsRoot, "run.pid"))
+		os.Exit(0)
 	}
 
 	dotSource, err := os.ReadFile(graphPath)

@@ -14,6 +14,52 @@ import (
 
 type tarFilter func(relPath string, entry fs.DirEntry) bool
 
+func isSensitiveCodexStatePath(relPath string) bool {
+	rel := filepath.ToSlash(strings.TrimPrefix(relPath, "./"))
+	if rel == "" || rel == "." {
+		return false
+	}
+	parts := strings.Split(rel, "/")
+	for _, part := range parts {
+		if part == "codex-home" || strings.HasPrefix(part, "codex-home-retry") {
+			return true
+		}
+	}
+	// Defense-in-depth in case sensitive codex files are copied outside codex-home.
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] != ".codex" {
+			continue
+		}
+		if parts[i+1] == "auth.json" || parts[i+1] == "config.toml" {
+			return true
+		}
+	}
+	return false
+}
+
+func includeInStageArchive(rel string, _ fs.DirEntry) bool {
+	if rel == "stage.tgz" || rel == "stage.tgz.tmp" {
+		return false
+	}
+	if isSensitiveCodexStatePath(rel) {
+		return false
+	}
+	return true
+}
+
+func includeInRunArchive(rel string, _ fs.DirEntry) bool {
+	if rel == "run.tgz" || rel == "run.tgz.tmp" {
+		return false
+	}
+	if rel == "worktree" || strings.HasPrefix(rel, "worktree/") {
+		return false
+	}
+	if isSensitiveCodexStatePath(rel) {
+		return false
+	}
+	return true
+}
+
 func writeTarGz(dstPath string, srcDir string, include tarFilter) error {
 	srcDir = filepath.Clean(srcDir)
 	if srcDir == "." || srcDir == string(filepath.Separator) {

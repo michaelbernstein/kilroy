@@ -2,14 +2,19 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/strongdm/kilroy/internal/agent"
@@ -448,6 +453,30 @@ func hasModelID(catalog *modeldb.LiteLLMCatalog, provider string, id string) boo
 	return normalizeProviderKey(entry.LiteLLMProvider) == provider
 }
 
+func catalogHasProviderModel(catalog *modeldb.LiteLLMCatalog, provider string, modelID string) bool {
+	if catalog == nil || catalog.Models == nil {
+		return false
+	}
+	provider = normalizeProviderKey(provider)
+	modelID = strings.TrimSpace(modelID)
+	if provider == "" || modelID == "" {
+		return false
+	}
+	for id, entry := range catalog.Models {
+		if normalizeProviderKey(entry.LiteLLMProvider) != provider {
+			continue
+		}
+		key := strings.TrimSpace(id)
+		if strings.EqualFold(key, modelID) {
+			return true
+		}
+		if strings.EqualFold(providerModelIDFromCatalogKey(provider, key), modelID) {
+			return true
+		}
+	}
+	return false
+}
+
 func providerModelIDFromCatalogKey(provider string, id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -590,8 +619,41 @@ func profileForProvider(provider string, modelID string) (agent.ProviderProfile,
 
 func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *model.Node, provider string, modelID string, prompt string) (string, *runtime.Outcome, error) {
 	stageDir := filepath.Join(execCtx.LogsRoot, node.ID)
+	providerKey := normalizeProviderKey(provider)
+	stderrPath := filepath.Join(stageDir, "stderr.log")
+	readStderr := func() string {
+		b, err := os.ReadFile(stderrPath)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+	classifiedFailure := func(runErr error, stderr string) *runtime.Outcome {
+		c := classifyProviderCLIError(providerKey, stderr, runErr)
+		return &runtime.Outcome{
+			Status:        runtime.StatusFail,
+			FailureReason: c.FailureReason,
+			Meta: map[string]any{
+				"failure_class":     c.FailureClass,
+				"failure_signature": c.FailureSignature,
+			},
+			ContextUpdates: map[string]any{
+				"failure_class": c.FailureClass,
+			},
+		}
+	}
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
-		return "", &runtime.Outcome{Status: runtime.StatusFail, FailureReason: err.Error()}, nil
+		return "", classifiedFailure(err, ""), nil
+	}
+
+	var isolatedEnv []string
+	var isolatedMeta map[string]any
+	if providerKey == "openai" {
+		var err error
+		isolatedEnv, isolatedMeta, err = buildCodexIsolatedEnv(stageDir)
+		if err != nil {
+			return "", classifiedFailure(err, ""), nil
+		}
 	}
 
 	exe, args := defaultCLIInvocation(provider, modelID, execCtx.WorktreeDir)
@@ -606,11 +668,11 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 	// fail fast (which is preferred to silently dropping observability artifacts).
 	var structuredOutPath string
 	var structuredSchemaPath string
-	if normalizeProviderKey(provider) == "openai" {
+	if providerKey == "openai" {
 		structuredSchemaPath = filepath.Join(stageDir, "output_schema.json")
 		structuredOutPath = filepath.Join(stageDir, "output.json")
 		if err := os.WriteFile(structuredSchemaPath, []byte(defaultCodexOutputSchema), 0o644); err != nil {
-			return "", nil, err
+			return "", classifiedFailure(err, ""), nil
 		}
 		if !hasArg(args, "--output-schema") {
 			args = append(args, "--output-schema", structuredSchemaPath)
@@ -638,9 +700,17 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		"working_dir":  execCtx.WorktreeDir,
 		"prompt_mode":  promptMode,
 		"prompt_bytes": len(prompt),
-		// Metaspec: capture how env was populated so the invocation is replayable.
-		"env_mode":      "inherit",
-		"env_allowlist": []string{"*"},
+	}
+	// Metaspec: capture how env was populated so the invocation is replayable.
+	if providerKey == "openai" {
+		inv["env_mode"] = "isolated"
+		inv["env_scope"] = "codex"
+		for k, v := range isolatedMeta {
+			inv[k] = v
+		}
+	} else {
+		inv["env_mode"] = "inherit"
+		inv["env_allowlist"] = []string{"*"}
 	}
 	if structuredOutPath != "" {
 		inv["structured_output_path"] = structuredOutPath
@@ -649,15 +719,18 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		inv["structured_output_schema_path"] = structuredSchemaPath
 	}
 	if err := writeJSON(filepath.Join(stageDir, "cli_invocation.json"), inv); err != nil {
-		return "", &runtime.Outcome{Status: runtime.StatusFail, FailureReason: err.Error()}, nil
+		return "", classifiedFailure(err, ""), nil
 	}
 
 	stdoutPath := filepath.Join(stageDir, "stdout.log")
-	stderrPath := filepath.Join(stageDir, "stderr.log")
 
 	runOnce := func(args []string) (runErr error, exitCode int, dur time.Duration, err error) {
 		cmd := exec.CommandContext(ctx, exe, args...)
 		cmd.Dir = execCtx.WorktreeDir
+		if providerKey == "openai" {
+			cmd.Env = isolatedEnv
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		}
 		if promptMode == "stdin" {
 			cmd.Stdin = strings.NewReader(prompt)
 		} else {
@@ -676,8 +749,21 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		defer func() { _ = stderrFile.Close() }()
 		cmd.Stdout = stdoutFile
 		cmd.Stderr = stderrFile
+
 		start := time.Now()
-		runErr = cmd.Run()
+		if err := cmd.Start(); err != nil {
+			return nil, -1, 0, err
+		}
+		idleTimeout := time.Duration(0)
+		killGrace := time.Duration(0)
+		if providerKey == "openai" {
+			idleTimeout = codexIdleTimeout()
+			killGrace = codexKillGrace()
+		}
+		runErr, _, err = waitWithIdleWatchdog(ctx, cmd, stdoutPath, stderrPath, idleTimeout, killGrace)
+		if err != nil {
+			return nil, -1, time.Since(start), err
+		}
 		dur = time.Since(start)
 		exitCode = -1
 		if cmd.ProcessState != nil {
@@ -686,19 +772,20 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		return runErr, exitCode, dur, nil
 	}
 
-	runErr, exitCode, dur, runErrDetail := runOnce(actualArgs)
+	runArgs := append([]string{}, actualArgs...)
+	runErr, exitCode, dur, runErrDetail := runOnce(runArgs)
 	if runErrDetail != nil {
-		return "", &runtime.Outcome{Status: runtime.StatusFail, FailureReason: runErrDetail.Error()}, nil
+		return "", classifiedFailure(runErrDetail, readStderr()), nil
 	}
 
-	if runErr != nil && normalizeProviderKey(provider) == "openai" && hasArg(actualArgs, "--output-schema") {
+	if runErr != nil && providerKey == "openai" && hasArg(runArgs, "--output-schema") {
 		stderrBytes, readErr := os.ReadFile(stderrPath)
 		if readErr == nil && isSchemaValidationFailure(string(stderrBytes)) {
 			warnEngine(execCtx, "codex schema validation failed; retrying once without --output-schema")
 			_ = copyFileContents(stdoutPath, filepath.Join(stageDir, "stdout.schema_failure.log"))
 			_ = copyFileContents(stderrPath, filepath.Join(stageDir, "stderr.schema_failure.log"))
 
-			retryArgs := removeArgWithValue(actualArgs, "--output-schema")
+			retryArgs := removeArgWithValue(runArgs, "--output-schema")
 			inv["schema_fallback_retry"] = true
 			inv["schema_fallback_reason"] = "schema_validation_failure"
 			inv["argv_schema_retry"] = retryArgs
@@ -708,7 +795,39 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 
 			retryErr, retryExitCode, retryDur, retryRunErr := runOnce(retryArgs)
 			if retryRunErr != nil {
-				return "", &runtime.Outcome{Status: runtime.StatusFail, FailureReason: retryRunErr.Error()}, nil
+				return "", classifiedFailure(retryRunErr, readStderr()), nil
+			}
+			runErr = retryErr
+			exitCode = retryExitCode
+			dur += retryDur
+			runArgs = retryArgs
+		}
+	}
+
+	if runErr != nil && providerKey == "openai" {
+		stderrBytes, readErr := os.ReadFile(stderrPath)
+		if readErr == nil && isStateDBDiscrepancy(string(stderrBytes)) {
+			warnEngine(execCtx, "codex state-db discrepancy detected; retrying once with fresh state root")
+			_ = copyFileContents(stdoutPath, filepath.Join(stageDir, "stdout.state_db_failure.log"))
+			_ = copyFileContents(stderrPath, filepath.Join(stageDir, "stderr.state_db_failure.log"))
+
+			retryEnv, retryMeta, buildErr := buildCodexIsolatedEnvWithName(stageDir, "codex-home-retry1")
+			if buildErr != nil {
+				return "", classifiedFailure(buildErr, readStderr()), nil
+			}
+			isolatedEnv = retryEnv
+			inv["state_db_fallback_retry"] = true
+			inv["state_db_fallback_reason"] = "state_db_record_discrepancy"
+			if retryRoot, ok := retryMeta["state_root"]; ok {
+				inv["state_db_retry_state_root"] = retryRoot
+			}
+			if err := writeJSON(filepath.Join(stageDir, "cli_invocation.json"), inv); err != nil {
+				warnEngine(execCtx, fmt.Sprintf("write cli_invocation.json state-db metadata: %v", err))
+			}
+
+			retryErr, retryExitCode, retryDur, retryRunErr := runOnce(runArgs)
+			if retryRunErr != nil {
+				return "", classifiedFailure(retryRunErr, readStderr()), nil
 			}
 			runErr = retryErr
 			exitCode = retryExitCode
@@ -719,7 +838,7 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 	// Best-effort: treat stdout as ndjson if it parses line-by-line.
 	wroteJSON, hadContent, ndErr := bestEffortNDJSON(stageDir, stdoutPath)
 	if ndErr != nil {
-		return "", &runtime.Outcome{Status: runtime.StatusFail, FailureReason: ndErr.Error()}, nil
+		return "", classifiedFailure(ndErr, readStderr()), nil
 	}
 	if hadContent && !wroteJSON {
 		warnEngine(execCtx, "stdout was not valid ndjson; wrote events.ndjson only")
@@ -738,7 +857,7 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		outStr = string(outBytes)
 	}
 	if runErr != nil {
-		return outStr, &runtime.Outcome{Status: runtime.StatusFail, FailureReason: runErr.Error()}, nil
+		return outStr, classifiedFailure(runErr, readStderr()), nil
 	}
 	return outStr, nil, nil
 }
@@ -759,6 +878,288 @@ func insertPromptArg(args []string, prompt string) []string {
 	}
 	out = append(out, prompt)
 	return out
+}
+
+func buildCodexIsolatedEnv(stageDir string) ([]string, map[string]any, error) {
+	return buildCodexIsolatedEnvWithName(stageDir, "codex-home")
+}
+
+func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string) ([]string, map[string]any, error) {
+	codexHome, err := codexIsolatedHomeDir(stageDir, homeDirName)
+	if err != nil {
+		return nil, nil, err
+	}
+	codexStateRoot := filepath.Join(codexHome, ".codex")
+	xdgConfigHome := filepath.Join(codexHome, ".config")
+	xdgDataHome := filepath.Join(codexHome, ".local", "share")
+	xdgStateHome := filepath.Join(codexHome, ".local", "state")
+
+	for _, dir := range []string{codexHome, codexStateRoot, xdgConfigHome, xdgDataHome, xdgStateHome} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	seeded := []string{}
+	seedErrors := []string{}
+	srcHome := strings.TrimSpace(os.Getenv("HOME"))
+	if srcHome != "" {
+		for _, name := range []string{"auth.json", "config.toml"} {
+			src := filepath.Join(srcHome, ".codex", name)
+			dst := filepath.Join(codexStateRoot, name)
+			copied, err := copyIfExists(src, dst)
+			if err != nil {
+				seedErrors = append(seedErrors, fmt.Sprintf("%s: %v", name, err))
+				continue
+			}
+			if copied {
+				seeded = append(seeded, dst)
+			}
+		}
+	}
+
+	env := mergeEnvWithOverrides(os.Environ(), map[string]string{
+		"HOME":            codexHome,
+		"CODEX_HOME":      codexStateRoot,
+		"XDG_CONFIG_HOME": xdgConfigHome,
+		"XDG_DATA_HOME":   xdgDataHome,
+		"XDG_STATE_HOME":  xdgStateHome,
+	})
+
+	meta := map[string]any{
+		"state_base_root":  codexStateBaseRoot(),
+		"state_root":       codexStateRoot,
+		"env_seeded_files": seeded,
+	}
+	if len(seedErrors) > 0 {
+		meta["env_seed_errors"] = seedErrors
+	}
+	return env, meta, nil
+}
+
+func codexIsolatedHomeDir(stageDir string, homeDirName string) (string, error) {
+	absStageDir, err := filepath.Abs(stageDir)
+	if err != nil {
+		return "", err
+	}
+	homeDirName = strings.TrimSpace(homeDirName)
+	if homeDirName == "" {
+		homeDirName = "codex-home"
+	}
+	sum := sha256.Sum256([]byte(absStageDir + "|" + homeDirName))
+	short := hex.EncodeToString(sum[:8])
+	return filepath.Join(codexStateBaseRoot(), fmt.Sprintf("%s-%s", homeDirName, short)), nil
+}
+
+func codexStateBaseRoot() string {
+	if override := strings.TrimSpace(os.Getenv("KILROY_CODEX_STATE_BASE")); override != "" {
+		if abs, err := filepath.Abs(override); err == nil {
+			return abs
+		}
+	}
+	base := strings.TrimSpace(os.Getenv("XDG_STATE_HOME"))
+	if base == "" {
+		home := strings.TrimSpace(os.Getenv("HOME"))
+		if home == "" {
+			base = "."
+		} else {
+			base = filepath.Join(home, ".local", "state")
+		}
+	}
+	root := filepath.Join(base, "kilroy", "attractor", "codex-state")
+	if abs, err := filepath.Abs(root); err == nil {
+		return abs
+	}
+	return root
+}
+
+func copyIfExists(src string, dst string) (bool, error) {
+	info, err := os.Stat(src)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("source is directory: %s", src)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return false, err
+	}
+	if err := copyFileContentsWithMode(src, dst, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func mergeEnvWithOverrides(base []string, overrides map[string]string) []string {
+	out := make([]string, 0, len(base)+len(overrides))
+	used := map[string]bool{}
+	for _, entry := range base {
+		key := entry
+		if idx := strings.IndexByte(entry, '='); idx >= 0 {
+			key = entry[:idx]
+		}
+		if v, ok := overrides[key]; ok {
+			out = append(out, key+"="+v)
+			used[key] = true
+			continue
+		}
+		out = append(out, entry)
+	}
+	remaining := make([]string, 0, len(overrides))
+	for k := range overrides {
+		if used[k] {
+			continue
+		}
+		remaining = append(remaining, k)
+	}
+	sort.Strings(remaining)
+	for _, k := range remaining {
+		out = append(out, k+"="+overrides[k])
+	}
+	return out
+}
+
+func codexIdleTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("KILROY_CODEX_IDLE_TIMEOUT"))
+	if v == "" {
+		return 2 * time.Minute
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 2 * time.Minute
+	}
+	return d
+}
+
+func codexKillGrace() time.Duration {
+	v := strings.TrimSpace(os.Getenv("KILROY_CODEX_KILL_GRACE"))
+	if v == "" {
+		return 2 * time.Second
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 2 * time.Second
+	}
+	return d
+}
+
+func waitWithIdleWatchdog(ctx context.Context, cmd *exec.Cmd, stdoutPath, stderrPath string, idleTimeout, killGrace time.Duration) (runErr error, timedOut bool, err error) {
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+	if idleTimeout <= 0 {
+		runErr := <-waitCh
+		return runErr, false, nil
+	}
+
+	const pollInterval = 250 * time.Millisecond
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	ownsProcessGroup := cmd != nil && cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid
+
+	lastActivity := time.Now()
+	lastStdoutSize, _ := fileSize(stdoutPath)
+	lastStderrSize, _ := fileSize(stderrPath)
+	for {
+		select {
+		case waitErr := <-waitCh:
+			return waitErr, false, nil
+		case <-ticker.C:
+			stdoutSize, _ := fileSize(stdoutPath)
+			stderrSize, _ := fileSize(stderrPath)
+			if stdoutSize != lastStdoutSize || stderrSize != lastStderrSize {
+				lastActivity = time.Now()
+				lastStdoutSize = stdoutSize
+				lastStderrSize = stderrSize
+			}
+			if time.Since(lastActivity) < idleTimeout {
+				continue
+			}
+			timeoutErr := fmt.Errorf("codex idle timeout after %s with no output", idleTimeout)
+			if ownsProcessGroup {
+				if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
+					return timeoutErr, true, err
+				}
+			}
+			if killGrace > 0 {
+				select {
+				case <-waitCh:
+					return timeoutErr, true, nil
+				case <-time.After(killGrace):
+				}
+			}
+			if ownsProcessGroup {
+				if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
+					return timeoutErr, true, err
+				}
+			}
+			select {
+			case <-waitCh:
+				return timeoutErr, true, nil
+			case <-time.After(2 * time.Second):
+				return timeoutErr, true, fmt.Errorf("timed out waiting for process exit after SIGKILL")
+			}
+		case <-ctx.Done():
+			if ownsProcessGroup {
+				if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
+					return ctx.Err(), false, err
+				}
+				if killGrace > 0 {
+					select {
+					case <-waitCh:
+						return ctx.Err(), false, nil
+					case <-time.After(killGrace):
+					}
+				}
+				if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
+					return ctx.Err(), false, err
+				}
+				select {
+				case <-waitCh:
+					return ctx.Err(), false, nil
+				case <-time.After(2 * time.Second):
+					return ctx.Err(), false, fmt.Errorf("timed out waiting for process exit after context cancellation")
+				}
+			}
+			waitErr := <-waitCh
+			if waitErr == nil {
+				waitErr = ctx.Err()
+			}
+			return waitErr, false, nil
+		}
+	}
+}
+
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func killProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	if err := syscall.Kill(-pgid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }
 
 func emitCXDBToolTurns(ctx context.Context, eng *Engine, nodeID string, ev agent.SessionEvent) {
@@ -814,7 +1215,7 @@ func defaultCLIInvocation(provider string, modelID string, worktreeDir string) (
 		args = []string{"exec", "--json", "--sandbox", "workspace-write", "-m", modelID, "-C", worktreeDir}
 	case "anthropic":
 		exe = envOr("KILROY_CLAUDE_PATH", "claude")
-		args = []string{"-p", "--output-format", "stream-json", "--model", modelID}
+		args = []string{"-p", "--output-format", "stream-json", "--verbose", "--model", modelID}
 	case "google":
 		exe = envOr("KILROY_GEMINI_PATH", "gemini")
 		// Metaspec: CLI adapters must be non-interactive. Gemini CLI supports this via --yolo / --approval-mode.
@@ -860,6 +1261,13 @@ func isSchemaValidationFailure(stderr string) bool {
 		strings.Contains(s, "invalid schema")
 }
 
+func isStateDBDiscrepancy(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "state db missing rollout path") ||
+		strings.Contains(s, "state db record_discrepancy") ||
+		strings.Contains(s, "record_discrepancy")
+}
+
 func removeArgWithValue(args []string, key string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -875,11 +1283,28 @@ func removeArgWithValue(args []string, key string) []string {
 }
 
 func copyFileContents(src string, dst string) error {
-	b, err := os.ReadFile(src)
+	return copyFileContentsWithMode(src, dst, 0o644)
+}
+
+func copyFileContentsWithMode(src string, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, b, 0o644)
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Chmod(perm); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // bestEffortNDJSON always writes events.ndjson (a copy of stdout.log) and, if the
