@@ -22,5 +22,20 @@ Although bringing your own agentic loop and unified LLM SDK is not required to b
   - Structured output schema is strict (`required: ["final","summary"]`, `additionalProperties: false`).
   - If codex rejects schema validation (`invalid_json_schema`-class errors), Attractor retries once without `--output-schema` and records fallback metadata in stage artifacts.
 - Loop safety:
-  - Use `loop_restart=true` on retry-loop edges that jump back to earlier stages.
-  - Set graph-level `max_restarts` to bound cycle count and prevent unbounded runs.
+  - `failure_class` defaults fail-closed to `deterministic` when unknown.
+  - Stage retry and `loop_restart` both use the same class-aware policy:
+    - `transient_infra`: retries/restarts are allowed.
+    - `deterministic`: retries/restarts are blocked.
+  - `loop_restart` adds signature circuit-breaking via `restart_signature_limit` (default `3`) to stop repeated identical transient failures.
+  - Set graph-level `max_restarts` to cap total restart attempts.
+- Fatal-path terminal artifacts:
+  - `final.json` is written for both success and failure outcomes.
+  - Failure outcomes include `failure_reason` in `final.json`.
+  - Terminal CXDB turns are emitted as `RunCompleted` (success) or `RunFailed` (failure).
+- Provider CLI preflight:
+  - Run and resume flows preflight required provider CLIs before execution.
+  - Preflight validates executable availability and probes selected capabilities (for example Anthropic `--verbose` support).
+  - Relative CLI state env paths (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GEMINI_CONFIG_DIR`) are normalized to absolute paths before subprocess launch.
+  - Invocation artifacts include `env_path_overrides` when normalization is applied.
+
+See [Reliability Troubleshooting](./reliability-troubleshooting.md) for detailed diagnostics and remediation steps.
