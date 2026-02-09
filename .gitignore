@@ -1,4 +1,5 @@
 .ai/
+/.worktrees/
 kilroy
 /restart-*/
 /internal/attractor/engine/cli_wrote.txt
