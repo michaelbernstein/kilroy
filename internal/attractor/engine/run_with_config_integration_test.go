@@ -18,6 +18,101 @@ import (
 	"github.com/strongdm/kilroy/internal/attractor/runtime"
 )
 
+func writeFakeCodexHelpCLI(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(p, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "exec" && "${2:-}" == "--help" ]]; then
+  echo "Usage: codex exec --json --sandbox workspace-write"
+  exit 0
+fi
+echo "ok"
+`), 0o755); err != nil {
+		t.Fatalf("write fake codex cli: %v", err)
+	}
+	return p
+}
+
+func TestRunWithConfig_RealProfileRejectsShimOverrideE2E(t *testing.T) {
+	repo := initTestRepo(t)
+	t.Setenv("KILROY_CODEX_PATH", "/tmp/fake/codex")
+
+	cfg := &RunConfigFile{Version: 1}
+	cfg.Repo.Path = repo
+	cfg.CXDB.BinaryAddr = "127.0.0.1:9"
+	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:9"
+	cfg.LLM.CLIProfile = "real"
+	cfg.LLM.Providers = map[string]ProviderConfig{
+		"openai": {Backend: BackendCLI},
+	}
+	cfg.ModelDB.LiteLLMCatalogPath = writePinnedCatalog(t)
+	cfg.ModelDB.LiteLLMCatalogUpdatePolicy = "pinned"
+
+	dot := []byte(`
+digraph G {
+  graph [goal="test"]
+  start [shape=Mdiamond]
+  exit  [shape=Msquare]
+  a [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="say hi"]
+  start -> a -> exit
+}
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "real-shim-override-e2e", LogsRoot: t.TempDir()})
+	if err == nil {
+		t.Fatalf("expected real profile override rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "llm.cli_profile=real forbids provider path overrides") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunWithConfig_TestShimRequiresExplicitGateAndExecutable(t *testing.T) {
+	repo := initTestRepo(t)
+	codexCLI := writeFakeCodexHelpCLI(t)
+
+	cfg := &RunConfigFile{Version: 1}
+	cfg.Repo.Path = repo
+	cfg.CXDB.BinaryAddr = "127.0.0.1:9"
+	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:9"
+	cfg.LLM.CLIProfile = "test_shim"
+	cfg.LLM.Providers = map[string]ProviderConfig{
+		"openai": {Backend: BackendCLI, Executable: codexCLI},
+	}
+	cfg.ModelDB.LiteLLMCatalogPath = writePinnedCatalog(t)
+	cfg.ModelDB.LiteLLMCatalogUpdatePolicy = "pinned"
+
+	dot := []byte(`
+digraph G {
+  graph [goal="test"]
+  start [shape=Mdiamond]
+  exit  [shape=Msquare]
+  a [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="say hi"]
+  start -> a -> exit
+}
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "shim-missing-gate", LogsRoot: t.TempDir()})
+	if err == nil {
+		t.Fatalf("expected --allow-test-shim gate error, got nil")
+	}
+	if !strings.Contains(err.Error(), "--allow-test-shim") {
+		t.Fatalf("unexpected gate error: %v", err)
+	}
+
+	_, err = RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "shim-with-gate", LogsRoot: t.TempDir(), AllowTestShim: true})
+	if err == nil {
+		t.Fatalf("expected downstream cxdb connectivity error, got nil")
+	}
+	if strings.Contains(err.Error(), "preflight:") {
+		t.Fatalf("expected preflight and policy checks to pass with explicit gate+executable, got: %v", err)
+	}
+}
+
 func TestRunWithConfig_CLIBackend_CapturesInvocationAndPersistsArtifactsToCXDB(t *testing.T) {
 	cleanupStrayEngineArtifacts(t)
 	t.Cleanup(func() { cleanupStrayEngineArtifacts(t) })

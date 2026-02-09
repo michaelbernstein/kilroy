@@ -492,6 +492,50 @@ func TestUsage_IncludesAllowTestShimFlag(t *testing.T) {
 	}
 }
 
+func TestAttractorRun_RealProfileRejectsShimOverride(t *testing.T) {
+	bin := buildKilroyBinary(t)
+	repo := initTestRepo(t)
+	catalog := writePinnedCatalog(t)
+	t.Setenv("KILROY_CODEX_PATH", "/tmp/fake/codex")
+
+	graph := filepath.Join(t.TempDir(), "openai.dot")
+	_ = os.WriteFile(graph, []byte(`
+digraph G {
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
+  a [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="hi"]
+  start -> a -> exit
+}
+`), 0o644)
+
+	cfg := filepath.Join(t.TempDir(), "run.yaml")
+	_ = os.WriteFile(cfg, []byte(fmt.Sprintf(`
+version: 1
+repo:
+  path: %s
+cxdb:
+  binary_addr: 127.0.0.1:9009
+  http_base_url: http://127.0.0.1:9010
+llm:
+  cli_profile: real
+  providers:
+    openai:
+      backend: cli
+modeldb:
+  litellm_catalog_path: %s
+  litellm_catalog_update_policy: pinned
+`, repo, catalog)), 0o644)
+
+	logsRoot := filepath.Join(t.TempDir(), "logs")
+	code, out := runKilroy(t, bin, "attractor", "run", "--graph", graph, "--config", cfg, "--run-id", "real-reject-shim", "--logs-root", logsRoot)
+	if code != 1 {
+		t.Fatalf("exit code: got %d want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "llm.cli_profile=real forbids provider path overrides") {
+		t.Fatalf("expected real profile override rejection, got:\n%s", out)
+	}
+}
+
 func TestKilroyAttractorRun_PrintsCXDBUILink(t *testing.T) {
 	cxdbSrv := newCXDBTestServer(t)
 	bin := buildKilroyBinary(t)
