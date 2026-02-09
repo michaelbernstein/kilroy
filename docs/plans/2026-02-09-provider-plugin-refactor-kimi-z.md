@@ -53,9 +53,33 @@ func TestCanonicalProviderKey_Aliases(t *testing.T) {
 }
 ```
 
+```go
+// internal/attractor/engine/config_test.go
+func TestNormalizeProviderKey_DelegatesToProviderSpecAliases(t *testing.T) {
+	if got := normalizeProviderKey("z-ai"); got != "zai" {
+		t.Fatalf("normalizeProviderKey(z-ai)=%q want zai", got)
+	}
+	if got := normalizeProviderKey("moonshot"); got != "kimi" {
+		t.Fatalf("normalizeProviderKey(moonshot)=%q want kimi", got)
+	}
+}
+```
+
+```go
+// internal/llm/client_test.go
+func TestNormalizeProviderName_DelegatesToProviderSpecAliases(t *testing.T) {
+	if got := normalizeProviderName("gemini"); got != "google" {
+		t.Fatalf("normalizeProviderName(gemini)=%q want google", got)
+	}
+	if got := normalizeProviderName("z-ai"); got != "zai" {
+		t.Fatalf("normalizeProviderName(z-ai)=%q want zai", got)
+	}
+}
+```
+
 **Step 2: Run test to verify it fails**
 
-Run: `go test ./internal/providerspec -run 'TestBuiltinSpecsIncludeCoreAndNewProviders|TestCanonicalProviderKey_Aliases' -v`
+Run: `go test ./internal/providerspec ./internal/attractor/engine ./internal/llm -run 'TestBuiltinSpecsIncludeCoreAndNewProviders|TestCanonicalProviderKey_Aliases|TestNormalizeProviderKey_DelegatesToProviderSpecAliases|TestNormalizeProviderName_DelegatesToProviderSpecAliases' -v`
 Expected: FAIL (`internal/providerspec` package does not exist)
 
 **Step 3: Write minimal implementation**
@@ -235,7 +259,7 @@ func normalizeProviderName(name string) string {
 
 **Step 4: Run test to verify it passes**
 
-Run: `go test ./internal/providerspec -v`
+Run: `go test ./internal/providerspec ./internal/attractor/engine ./internal/llm -run 'TestBuiltinSpecsIncludeCoreAndNewProviders|TestCanonicalProviderKey_Aliases|TestNormalizeProviderKey_DelegatesToProviderSpecAliases|TestNormalizeProviderName_DelegatesToProviderSpecAliases' -v`
 Expected: PASS
 
 **Step 5: Commit**
@@ -324,11 +348,29 @@ llm:
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestLoadRunConfig_BackwardCompatibleBuiltinProvidersStillValid(t *testing.T) {
+	yml := []byte(`
+version: 1
+repo: { path: /tmp/repo }
+cxdb: { binary_addr: 127.0.0.1:9009, http_base_url: http://127.0.0.1:9010 }
+modeldb: { litellm_catalog_path: /tmp/catalog.json }
+llm:
+  providers:
+    openai: { backend: api }
+    anthropic: { backend: api }
+    google: { backend: api }
+`)
+	_, err := loadRunConfigFromBytesForTest(t, yml)
+	if err != nil {
+		t.Fatalf("unexpected backward-compat validation error: %v", err)
+	}
+}
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `go test ./internal/attractor/engine -run 'TestLoadRunConfig_CustomAPIProviderRequiresProtocol|TestLoadRunConfig_KimiAPIProtocolAccepted|TestLoadRunConfig_ZAIAliasAcceptedWithAPIProtocol' -v`
+Run: `go test ./internal/attractor/engine -run 'TestLoadRunConfig_CustomAPIProviderRequiresProtocol|TestLoadRunConfig_KimiAPIProtocolAccepted|TestLoadRunConfig_ZAIAliasAcceptedWithAPIProtocol|TestLoadRunConfig_BackwardCompatibleBuiltinProvidersStillValid' -v`
 Expected: FAIL (new `api` fields missing from schema/validation)
 
 **Step 3: Write minimal implementation**
@@ -353,6 +395,9 @@ type ProviderConfig struct {
 ```
 
 ```go
+// Remove the old hard-coded provider allowlist switch entirely:
+//   switch normalizeProviderKey(prov) { case "openai","anthropic","google": ... }
+// and replace it with protocol-driven validation:
 for prov, pc := range cfg.LLM.Providers {
 	canonical := providerspec.CanonicalProviderKey(prov)
 	builtin, hasBuiltin := providerspec.Builtin(canonical)
@@ -381,7 +426,7 @@ for prov, pc := range cfg.LLM.Providers {
 
 **Step 4: Run test to verify it passes**
 
-Run: `go test ./internal/attractor/engine -run 'TestLoadRunConfig_CustomAPIProviderRequiresProtocol|TestLoadRunConfig_KimiAPIProtocolAccepted|TestLoadRunConfig_ZAIAliasAcceptedWithAPIProtocol' -v`
+Run: `go test ./internal/attractor/engine -run 'TestLoadRunConfig_CustomAPIProviderRequiresProtocol|TestLoadRunConfig_KimiAPIProtocolAccepted|TestLoadRunConfig_ZAIAliasAcceptedWithAPIProtocol|TestLoadRunConfig_BackwardCompatibleBuiltinProvidersStillValid' -v`
 Expected: PASS
 
 **Step 5: Commit**
@@ -436,13 +481,13 @@ type ProviderRuntime struct {
 	Executable    string
 	API           providerspec.APISpec
 	CLI           *providerspec.CLISpec
-	apiHeaders    map[string]string
+	APIHeadersMap map[string]string
 	Failover      []string
 	ProfileFamily string
 }
 
 func (r ProviderRuntime) APIHeaders() map[string]string {
-	return cloneStringMap(r.apiHeaders)
+	return cloneStringMap(r.APIHeadersMap)
 }
 
 func resolveProviderRuntimes(cfg *RunConfigFile) (map[string]ProviderRuntime, error) {
@@ -477,7 +522,7 @@ func resolveProviderRuntimes(cfg *RunConfigFile) (map[string]ProviderRuntime, er
 		if v := strings.TrimSpace(pc.API.ProfileFamily); v != "" {
 			rt.API.ProfileFamily = v
 		}
-		rt.apiHeaders = cloneStringMap(pc.API.Headers)
+		rt.APIHeadersMap = cloneStringMap(pc.API.Headers)
 		rt.ProfileFamily = rt.API.ProfileFamily
 		if len(pc.Failover) > 0 {
 			rt.Failover = providerspec.CanonicalizeProviderList(pc.Failover)
@@ -595,7 +640,7 @@ func NewFromProviderRuntimes(runtimes map[string]engine.ProviderRuntime) (*llm.C
 		case providerspec.ProtocolGoogleGenerateContent:
 			c.Register(google.NewWithProvider(key, apiKey, rt.API.DefaultBaseURL))
 		case providerspec.ProtocolOpenAIChatCompletions:
-			c.Register(openaicompat.NewAdapter(openaicompat.Config{Provider: key, APIKey: apiKey, BaseURL: rt.API.DefaultBaseURL, Path: rt.API.DefaultPath, OptionsKey: rt.API.ProviderOptionsKey, ExtraHeaders: rt.APIHeaders()}))
+			return nil, fmt.Errorf("protocol %q wiring lands in Task 5", rt.API.Protocol)
 		default:
 			return nil, fmt.Errorf("unsupported api protocol %q for provider %s", rt.API.Protocol, key)
 		}
@@ -648,6 +693,10 @@ Apply the same constructor/name pattern in:
 - `internal/llm/providers/anthropic/adapter.go` using default base URL `https://api.anthropic.com`
 - `internal/llm/providers/google/adapter.go` using default base URL `https://generativelanguage.googleapis.com`
 
+Sequencing note:
+- Task 4 intentionally wires OpenAI/Anthropic/Google first.
+- Task 5 adds `ProtocolOpenAIChatCompletions` support and updates `internal/llmclient/from_runtime.go` in the same commit as `openaicompat`.
+
 **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/llmclient ./internal/llm/providers/openai ./internal/llm/providers/anthropic ./internal/llm/providers/google -v`
@@ -665,6 +714,8 @@ git commit -m "refactor(llmclient): construct API adapters from runtime provider
 **Files:**
 - Create: `internal/llm/providers/openaicompat/adapter.go`
 - Test: `internal/llm/providers/openaicompat/adapter_test.go`
+- Modify: `internal/llmclient/from_runtime.go`
+- Test: `internal/llmclient/from_runtime_test.go`
 
 **Step 1: Write the failing test**
 
@@ -798,17 +849,111 @@ func (a *Adapter) Stream(ctx context.Context, req llm.Request) (llm.Stream, erro
 	}()
 	return s, nil
 }
+
+func toChatCompletionsBody(req llm.Request, optionsKey string) []byte {
+	body := map[string]any{
+		"model":    req.Model,
+		"messages": toChatCompletionsMessages(req.Messages),
+	}
+	if len(req.Tools) > 0 {
+		body["tools"] = toChatCompletionsTools(req.Tools)
+	}
+	if req.ToolChoice != nil {
+		body["tool_choice"] = toChatCompletionsToolChoice(*req.ToolChoice)
+	}
+	if req.ProviderOptions != nil {
+		if ov, ok := req.ProviderOptions[optionsKey].(map[string]any); ok {
+			for k, v := range ov {
+				body[k] = v
+			}
+		}
+	}
+	b, _ := json.Marshal(body)
+	return b
+}
+
+func parseChatCompletionsResponse(provider, model string, resp *http.Response) (llm.Response, error) {
+	rawBytes, _ := io.ReadAll(resp.Body)
+	var raw map[string]any
+	_ = json.Unmarshal(rawBytes, &raw)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		ra := llm.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		return llm.Response{}, llm.ErrorFromHTTPStatus(provider, resp.StatusCode, "chat.completions failed", raw, ra)
+	}
+	return fromChatCompletions(provider, model, raw), nil
+}
+
+func toChatCompletionsMessages(msgs []llm.Message) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, map[string]any{
+			"role":    string(m.Role),
+			"content": m.Text(),
+		})
+	}
+	return out
+}
+
+func toChatCompletionsTools(tools []llm.ToolDefinition) []map[string]any {
+	out := make([]map[string]any, 0, len(tools))
+	for _, td := range tools {
+		out = append(out, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        td.Name,
+				"description": td.Description,
+				"parameters":  td.Parameters,
+			},
+		})
+	}
+	return out
+}
+
+func toChatCompletionsToolChoice(tc llm.ToolChoice) any {
+	mode := strings.ToLower(strings.TrimSpace(tc.Mode))
+	switch mode {
+	case "", "auto":
+		return "auto"
+	case "none":
+		return "none"
+	case "required":
+		return "required"
+	case "named":
+		return map[string]any{"type": "function", "function": map[string]any{"name": tc.Name}}
+	default:
+		return "auto"
+	}
+}
+
+func fromChatCompletions(provider, model string, raw map[string]any) llm.Response {
+	// Parse assistant content/tool_calls/usage from first choice; preserve raw payload.
+	// (Implementation detail: mirror OpenAI adapter response mapping helpers.)
+	return llm.Response{Provider: provider, Model: model, Raw: raw}
+}
+```
+
+```go
+// internal/llmclient/from_runtime.go (Task 5 follow-up wiring)
+case providerspec.ProtocolOpenAIChatCompletions:
+	c.Register(openaicompat.NewAdapter(openaicompat.Config{
+		Provider:     key,
+		APIKey:       apiKey,
+		BaseURL:      rt.API.DefaultBaseURL,
+		Path:         rt.API.DefaultPath,
+		OptionsKey:   rt.API.ProviderOptionsKey,
+		ExtraHeaders: rt.APIHeaders(),
+	}))
 ```
 
 **Step 4: Run test to verify it passes**
 
-Run: `go test ./internal/llm/providers/openaicompat -v`
+Run: `go test ./internal/llm/providers/openaicompat ./internal/llmclient -v`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add internal/llm/providers/openaicompat/adapter.go internal/llm/providers/openaicompat/adapter_test.go
+git add internal/llm/providers/openaicompat/adapter.go internal/llm/providers/openaicompat/adapter_test.go internal/llmclient/from_runtime.go internal/llmclient/from_runtime_test.go
 git commit -m "feat(llm): add generic OpenAI Chat Completions adapter for protocol-based providers"
 ```
 
@@ -824,10 +969,11 @@ git commit -m "feat(llm): add generic OpenAI Chat Completions adapter for protoc
 **Step 1: Write the failing test**
 
 ```go
-func TestProfileForProvider_UsesConfiguredProfileFamily(t *testing.T) {
-	p, err := agent.NewProfileForFamily("openai", "glm-4.7")
+func TestProfileForRuntimeProvider_UsesConfiguredProfileFamily(t *testing.T) {
+	rt := ProviderRuntime{Key: "zai", ProfileFamily: "openai"}
+	p, err := profileForRuntimeProvider(rt, "glm-4.7")
 	if err != nil {
-		t.Fatalf("NewProfileForFamily: %v", err)
+		t.Fatalf("profileForRuntimeProvider: %v", err)
 	}
 	if p.ID() != "openai" {
 		t.Fatalf("expected openai family profile")
@@ -857,8 +1003,8 @@ func TestPickFailoverModelFromRuntime_NeverReturnsEmptyForConfiguredProvider(t *
 
 **Step 2: Run test to verify it fails**
 
-Run: `go test ./internal/agent ./internal/attractor/engine -run 'TestProfileForProvider_UsesConfiguredProfileFamily|TestFailoverOrder_UsesRuntimeProviderPolicy|TestPickFailoverModelFromRuntime_NeverReturnsEmptyForConfiguredProvider' -v`
-Expected: FAIL (`NewProfileForFamily` / `failoverOrderFromRuntime` / `pickFailoverModelFromRuntime` missing)
+Run: `go test ./internal/agent ./internal/attractor/engine -run 'TestProfileForRuntimeProvider_UsesConfiguredProfileFamily|TestFailoverOrder_UsesRuntimeProviderPolicy|TestPickFailoverModelFromRuntime_NeverReturnsEmptyForConfiguredProvider' -v`
+Expected: FAIL (`profileForRuntimeProvider` / `failoverOrderFromRuntime` / `pickFailoverModelFromRuntime` missing)
 
 **Step 3: Write minimal implementation**
 
@@ -882,8 +1028,16 @@ func NewProfileForFamily(family string, model string) (ProviderProfile, error) {
 
 ```go
 // codergen_router.go (usage)
-profile, err := agent.NewProfileForFamily(runtimeProvider.ProfileFamily, mid)
-...
+profile, err := profileForRuntimeProvider(runtimeProvider, mid)
+if err != nil { return nil, err }
+func profileForRuntimeProvider(rt ProviderRuntime, model string) (agent.ProviderProfile, error) {
+	family := strings.TrimSpace(rt.ProfileFamily)
+	if family == "" {
+		family = rt.Key
+	}
+	return agent.NewProfileForFamily(family, model)
+}
+
 func failoverOrderFromRuntime(primary string, rt map[string]ProviderRuntime) []string {
 	p := providerspec.CanonicalProviderKey(primary)
 	if r, ok := rt[p]; ok && len(r.Failover) > 0 {
@@ -895,15 +1049,23 @@ func failoverOrderFromRuntime(primary string, rt map[string]ProviderRuntime) []s
 func pickFailoverModelFromRuntime(provider string, rt map[string]ProviderRuntime, catalog *modeldb.LiteLLMCatalog, fallbackModel string) string {
 	p := providerspec.CanonicalProviderKey(provider)
 	for _, cand := range []string{
-		strings.TrimSpace(fallbackModel),
 		pickFailoverModel(p, catalog),
 		bestModelForProvider(catalog, p),
+		strings.TrimSpace(fallbackModel),
 	} {
 		if strings.TrimSpace(cand) != "" {
 			return strings.TrimSpace(cand)
 		}
 	}
 	return fallbackModel
+}
+
+func bestModelForProvider(catalog *modeldb.LiteLLMCatalog, provider string) string {
+	ids := modelIDsForProvider(catalog, provider)
+	if len(ids) == 0 {
+		return ""
+	}
+	return providerModelIDFromCatalogKey(provider, ids[0])
 }
 ```
 
@@ -970,13 +1132,55 @@ func materializeCLIInvocation(spec providerspec.CLISpec, modelID, worktree, prom
 
 ```go
 // provider_preflight.go
-func missingCapabilityTokensFromSpec(spec *providerspec.CLISpec, helpOutput string) []string { ... }
-func probeOutputLooksLikeHelpFromSpec(spec *providerspec.CLISpec, output string) bool { ... }
+func missingCapabilityTokensFromSpec(spec *providerspec.CLISpec, helpOutput string) []string {
+	if spec == nil {
+		return nil
+	}
+	missing := []string{}
+	for _, tok := range spec.CapabilityAll {
+		if !strings.Contains(helpOutput, tok) {
+			missing = append(missing, tok)
+		}
+	}
+	for _, anyGroup := range spec.CapabilityAnyOf {
+		found := false
+		for _, tok := range anyGroup {
+			if strings.Contains(helpOutput, tok) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, strings.Join(anyGroup, "|"))
+		}
+	}
+	return missing
+}
+
+func probeOutputLooksLikeHelpFromSpec(spec *providerspec.CLISpec, output string) bool {
+	if spec == nil || len(spec.CapabilityAll) == 0 {
+		return strings.Contains(strings.ToLower(output), "usage")
+	}
+	for _, tok := range spec.CapabilityAll {
+		if strings.Contains(output, tok) {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(output), "usage")
+}
 ```
 
 ```go
 // provider_error_classification.go
-func classifyProviderCLIErrorWithContract(provider string, spec *providerspec.CLISpec, stderr string, runErr error) providerCLIClassifiedError { ... }
+func classifyProviderCLIErrorWithContract(provider string, spec *providerspec.CLISpec, stderr string, runErr error) providerCLIClassifiedError {
+	if isExecutableNotFound(runErr) {
+		return providerCLIClassifiedError{Kind: providerCLIErrorKindExecutableMissing, Message: "provider executable not found"}
+	}
+	if spec != nil && !probeOutputLooksLikeHelpFromSpec(spec, stderr) && strings.Contains(stderr, "unknown option") {
+		return providerCLIClassifiedError{Kind: providerCLIErrorKindCapabilityMissing, Message: "provider CLI missing required capability flags"}
+	}
+	return providerCLIClassifiedError{Kind: providerCLIErrorKindUnknown, Message: strings.TrimSpace(stderr)}
+}
 ```
 
 **Step 4: Run test to verify it passes**
@@ -1002,7 +1206,23 @@ git commit -m "refactor(engine-cli): replace provider-name switches with CLI con
 **Step 1: Write the failing test**
 
 ```go
+func writeProviderCatalogForTest(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(p, []byte(`{
+  "kimi-k2.5": {"litellm_provider":"kimi","mode":"chat"},
+  "glm-4.7": {"litellm_provider":"zai","mode":"chat"}
+}`), 0o644); err != nil {
+		t.Fatalf("write catalog: %v", err)
+	}
+	return p
+}
+
 func TestRunWithConfig_AcceptsKimiAndZaiAPIProviders(t *testing.T) {
+	repo := initTestRepo(t)
+	cxdbSrv := newCXDBTestServer(t)
+	catalogPath := writeProviderCatalogForTest(t)
+
 	cases := []struct {
 		provider string
 		model    string
@@ -1015,12 +1235,20 @@ func TestRunWithConfig_AcceptsKimiAndZaiAPIProviders(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.provider, func(t *testing.T) {
-			dot := []byte(fmt.Sprintf(`digraph G { a [shape=box, llm_provider=%s, llm_model=%s, prompt="hi"] }`, tc.provider, tc.model))
+			dot := []byte(fmt.Sprintf(`
+digraph G {
+  start [shape=Mdiamond]
+  exit  [shape=Msquare]
+  a [shape=box, llm_provider=%s, llm_model=%s, prompt="hi"]
+  start -> a -> exit
+}
+`, tc.provider, tc.model))
 			cfg := &RunConfigFile{Version: 1}
-			cfg.Repo.Path = "/tmp/repo"
-			cfg.CXDB.BinaryAddr = "127.0.0.1:9009"
-			cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:9010"
-			cfg.ModelDB.LiteLLMCatalogPath = "/tmp/catalog.json"
+			cfg.Repo.Path = repo
+			cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
+			cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
+			cfg.ModelDB.LiteLLMCatalogPath = catalogPath
+			cfg.ModelDB.LiteLLMCatalogUpdatePolicy = "pinned"
 			cfg.LLM.Providers = map[string]ProviderConfig{
 				tc.provider: {Backend: BackendAPI, API: ProviderAPIConfig{Protocol: "openai_chat_completions", APIKeyEnv: tc.keyEnv, BaseURL: "http://127.0.0.1:1", Path: tc.path, ProfileFamily: "openai"}},
 			}
@@ -1031,6 +1259,9 @@ func TestRunWithConfig_AcceptsKimiAndZaiAPIProviders(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "unsupported provider") {
 				t.Fatalf("provider should be accepted, got %v", err)
+			}
+			if strings.Contains(err.Error(), "not found in model catalog") {
+				t.Fatalf("provider/model should pass catalog validation, got %v", err)
 			}
 		})
 	}
@@ -1074,10 +1305,14 @@ git commit -m "feat(engine): accept kimi and zai API providers via runtime provi
 
 **Files:**
 - Create: `internal/attractor/engine/kimi_zai_api_integration_test.go`
+- Create (if missing): `internal/attractor/engine/test_helpers_test.go`
 
 **Step 1: Write the failing test**
 
 ```go
+// Reuse helpers from existing engine integration tests. If any helper is not
+// already available in package `engine`, move/copy it into
+// `test_helpers_test.go` so this file compiles in isolation.
 func TestKimiAndZai_OpenAIChatCompletionsIntegration(t *testing.T) {
 	var seenPaths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
