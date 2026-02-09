@@ -9,6 +9,7 @@ Although bringing your own agentic loop and unified LLM SDK is not required to b
 - [Attractor Specification](./attractor-spec.md)
 - [Coding Agent Loop Specification](./coding-agent-loop-spec.md)
 - [Unified LLM Client Specification](./unified-llm-spec.md)
+- [Reliability Troubleshooting Runbook](./reliability-troubleshooting.md)
 
 ## Runbook Notes
 
@@ -43,6 +44,7 @@ Although bringing your own agentic loop and unified LLM SDK is not required to b
 - Fan-in all-fail behavior:
   - When all parallel branches are `status=fail`, fan-in emits `failure_class` + `failure_signature` on the aggregate fail outcome.
   - Deterministic precedence is fail-closed: any deterministic/unknown branch class makes aggregate deterministic.
+  - For `parallel.fan_in` fail/retry outcomes, routing precedence is: matching conditional edge, then retry-target chain, then terminal fail. Unconditional edges are not used for fail/retry fan-in outcomes.
   - Current caveat: `status=retry` branches are still considered winner candidates by heuristic selection; all-fail aggregation only runs when every branch is `status=fail`.
 - Detached runs:
   - Launch long-running jobs with `./kilroy attractor run --detach --graph <graph.dot> --config <run.yaml> --run-id <run_id> --logs-root <logs_root>`.
