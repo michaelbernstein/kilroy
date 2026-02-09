@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestKimiCodingAndZai_OpenAIChatCompletionsIntegration(t *testing.T) {
+func TestKimiCodingAndZai_APIIntegration(t *testing.T) {
 	repo := initTestRepo(t)
 	logsRoot := t.TempDir()
 	pinned := writeProviderCatalogForTest(t)

@@ -43,6 +43,8 @@ func TestNewAPIClientFromProviderRuntimes_CLIOnlyIsNotAnError(t *testing.T) {
 }
 
 func TestNewAPIClientFromProviderRuntimes_RegistersOpenAICompatByProtocol(t *testing.T) {
+	// Explicit protocol overrides should still route via OpenAI-compat even if
+	// a provider's builtin defaults use a different protocol.
 	runtimes := map[string]ProviderRuntime{
 		"kimi": {
 			Key:     "kimi",
