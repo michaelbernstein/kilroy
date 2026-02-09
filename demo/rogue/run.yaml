@@ -1,0 +1,37 @@
+version: 1
+
+repo:
+  path: /home/user/code/kilroy
+
+cxdb:
+  binary_addr: 127.0.0.1:9009
+  http_base_url: http://127.0.0.1:9010
+
+llm:
+  cli_profile: real
+  providers:
+    kimi:
+      backend: api
+      api:
+        protocol: anthropic_messages
+        api_key_env: KIMI_API_KEY
+        base_url: https://api.kimi.com/coding
+        path: /v1/messages
+        profile_family: openai
+    zai:
+      backend: api
+      api:
+        protocol: openai_chat_completions
+        api_key_env: ZAI_API_KEY
+        base_url: https://api.z.ai
+        path: /api/coding/paas/v4/chat/completions
+        profile_family: openai
+
+modeldb:
+  openrouter_model_info_path: /home/user/code/kilroy/internal/attractor/modeldb/pinned/openrouter_models.json
+  openrouter_model_info_update_policy: pinned
+
+git:
+  require_clean: false
+  run_branch_prefix: attractor/run
+  commit_per_node: true
