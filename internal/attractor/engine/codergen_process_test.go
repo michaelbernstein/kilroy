@@ -38,7 +38,6 @@ done
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("KILROY_CODEX_PATH", cli)
 	t.Setenv("KILROY_WATCHDOG_CHILD_PID_FILE", childPIDFile)
 	t.Setenv("KILROY_CODEX_IDLE_TIMEOUT", "2s")
 	t.Setenv("KILROY_CODEX_KILL_GRACE", "200ms")
@@ -47,8 +46,9 @@ done
 	cfg.Repo.Path = repo
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
+	cfg.LLM.CLIProfile = "test_shim"
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendCLI},
+		"openai": {Backend: BackendCLI, Executable: cli},
 	}
 	cfg.ModelDB.LiteLLMCatalogPath = pinned
 	cfg.ModelDB.LiteLLMCatalogUpdatePolicy = "pinned"
@@ -66,7 +66,7 @@ digraph G {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	res, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "watchdog-timeout", LogsRoot: logsRoot})
+	res, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "watchdog-timeout", LogsRoot: logsRoot, AllowTestShim: true})
 	if err != nil {
 		t.Fatalf("RunWithConfig: %v", err)
 	}

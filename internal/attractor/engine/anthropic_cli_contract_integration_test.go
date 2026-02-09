@@ -37,14 +37,13 @@ echo '{"type":"done","text":"ok"}'
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("KILROY_CLAUDE_PATH", cli)
-
 	cfg := &RunConfigFile{Version: 1}
 	cfg.Repo.Path = repo
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
+	cfg.LLM.CLIProfile = "test_shim"
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"anthropic": {Backend: BackendCLI},
+		"anthropic": {Backend: BackendCLI, Executable: cli},
 	}
 	cfg.ModelDB.LiteLLMCatalogPath = catalog
 	cfg.ModelDB.LiteLLMCatalogUpdatePolicy = "pinned"
@@ -54,7 +53,7 @@ echo '{"type":"done","text":"ok"}'
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	res, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "anthropic-contract-ok", LogsRoot: logsRoot})
+	res, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "anthropic-contract-ok", LogsRoot: logsRoot, AllowTestShim: true})
 	if err != nil {
 		t.Fatalf("RunWithConfig: %v", err)
 	}
@@ -95,17 +94,18 @@ func TestAnthropicCLIContract_PreflightFailsWhenVerboseCapabilityMissing(t *test
     "mode": "chat"
   }
 }`)
-	t.Setenv("KILROY_CLAUDE_PATH", writeFakeCLI(t, "claude", "Usage: claude -p --output-format stream-json --model MODEL", 0))
+	claudeCLI := writeFakeCLI(t, "claude", "Usage: claude -p --output-format stream-json --model MODEL", 0)
 
 	cfg := testPreflightConfigForProviders(repo, catalog, map[string]BackendKind{
 		"anthropic": BackendCLI,
 	})
+	cfg.LLM.Providers["anthropic"] = ProviderConfig{Backend: BackendCLI, Executable: claudeCLI}
 	dot := singleProviderDot("anthropic", "claude-sonnet-4-20250514")
 
 	logsRoot := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "anthropic-contract-missing-verbose", LogsRoot: logsRoot})
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "anthropic-contract-missing-verbose", LogsRoot: logsRoot, AllowTestShim: true})
 	if err == nil {
 		t.Fatalf("expected anthropic preflight failure, got nil")
 	}

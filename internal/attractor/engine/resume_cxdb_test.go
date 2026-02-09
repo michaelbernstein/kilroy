@@ -29,13 +29,12 @@ func TestResumeFromCXDB_FindsLogsRootFromTurns(t *testing.T) {
 	if err := os.WriteFile(cli, []byte("#!/usr/bin/env bash\nset -euo pipefail\n\necho '{\"type\":\"done\",\"text\":\"ok\"}'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("KILROY_CODEX_PATH", cli)
-
 	cfg := &RunConfigFile{Version: 1}
 	cfg.Repo.Path = repo
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
-	cfg.LLM.Providers = map[string]ProviderConfig{"openai": {Backend: BackendCLI}}
+	cfg.LLM.CLIProfile = "test_shim"
+	cfg.LLM.Providers = map[string]ProviderConfig{"openai": {Backend: BackendCLI, Executable: cli}}
 	cfg.ModelDB.LiteLLMCatalogPath = pinned
 	cfg.ModelDB.LiteLLMCatalogUpdatePolicy = "pinned"
 	cfg.Git.RunBranchPrefix = "attractor/run"
@@ -52,7 +51,7 @@ digraph G {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	res, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "cxdb-run", LogsRoot: logsRoot})
+	res, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "cxdb-run", LogsRoot: logsRoot, AllowTestShim: true})
 	if err != nil {
 		t.Fatalf("RunWithConfig: %v", err)
 	}

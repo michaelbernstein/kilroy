@@ -22,9 +22,9 @@ func TestRunWithConfig_CLIDeterministicFailure_DoesNotConsumeRetryBudget(t *test
 
 	callCountFile := filepath.Join(t.TempDir(), "calls.txt")
 	t.Setenv("KILROY_CALL_COUNT_FILE", callCountFile)
-	t.Setenv("KILROY_CODEX_PATH", writeDeterministicFailingCodexCLI(t))
+	codexCLI := writeDeterministicFailingCodexCLI(t)
 
-	cfg := testOpenAICLIConfig(repo, pinned, cxdbSrv)
+	cfg := testOpenAICLIConfig(repo, pinned, cxdbSrv, codexCLI)
 	dot := []byte(`
 digraph G {
   graph [goal="test stage retry gate", default_max_retry="3"]
@@ -38,7 +38,7 @@ digraph G {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "retry-gate-integration", LogsRoot: logsRoot})
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "retry-gate-integration", LogsRoot: logsRoot, AllowTestShim: true})
 	if err == nil {
 		t.Fatalf("expected deterministic failure error, got nil")
 	}
@@ -65,9 +65,9 @@ func TestRunWithConfig_CLIDeterministicFailure_BlocksStageRetryAndLoopRestart_Wr
 
 	callCountFile := filepath.Join(t.TempDir(), "calls.txt")
 	t.Setenv("KILROY_CALL_COUNT_FILE", callCountFile)
-	t.Setenv("KILROY_CODEX_PATH", writeDeterministicFailingCodexCLI(t))
+	codexCLI := writeDeterministicFailingCodexCLI(t)
 
-	cfg := testOpenAICLIConfig(repo, pinned, cxdbSrv)
+	cfg := testOpenAICLIConfig(repo, pinned, cxdbSrv, codexCLI)
 	dot := []byte(`
 digraph G {
   graph [goal="test loop restart gate", default_max_retry="3", max_restarts="5"]
@@ -84,7 +84,7 @@ digraph G {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "retry-loop-gate-integration", LogsRoot: logsRoot})
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "retry-loop-gate-integration", LogsRoot: logsRoot, AllowTestShim: true})
 	if err == nil {
 		t.Fatalf("expected loop restart blocked error, got nil")
 	}
@@ -126,13 +126,14 @@ digraph G {
 	}
 }
 
-func testOpenAICLIConfig(repo string, pinned string, cxdbSrv *cxdbTestServer) *RunConfigFile {
+func testOpenAICLIConfig(repo string, pinned string, cxdbSrv *cxdbTestServer, codexCLI string) *RunConfigFile {
 	cfg := &RunConfigFile{Version: 1}
 	cfg.Repo.Path = repo
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
+	cfg.LLM.CLIProfile = "test_shim"
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendCLI},
+		"openai": {Backend: BackendCLI, Executable: codexCLI},
 	}
 	cfg.ModelDB.LiteLLMCatalogPath = pinned
 	cfg.ModelDB.LiteLLMCatalogUpdatePolicy = "pinned"
