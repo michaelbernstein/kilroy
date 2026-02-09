@@ -42,6 +42,8 @@ Although bringing your own agentic loop and unified LLM SDK is not required to b
   - Always writes `<logs_root>/preflight_report.json` (pass/warn/fail checks and summary).
   - `KILROY_PREFLIGHT_STRICT_CAPABILITIES=1` turns capability-probe failures into hard preflight failures.
   - `KILROY_PREFLIGHT_CAPABILITY_PROBES=off` disables capability probing and keeps binary-presence checks only.
+  - API prompt probes retry transient failures by default (timeout `30000ms`, retries `2`, backoff `500ms` to `5000ms`).
+  - Tune with `KILROY_PREFLIGHT_API_PROMPT_PROBE_TIMEOUT_MS`, `KILROY_PREFLIGHT_API_PROMPT_PROBE_RETRIES`, `KILROY_PREFLIGHT_API_PROMPT_PROBE_BASE_DELAY_MS`, `KILROY_PREFLIGHT_API_PROMPT_PROBE_MAX_DELAY_MS`.
 - Provider plug-ins (runtime metadata):
   - Providers are resolved through runtime metadata (protocol family + backend + failover), not hard-coded provider switches.
   - Built-ins: `openai`, `anthropic`, `google`, `kimi`, `zai`.

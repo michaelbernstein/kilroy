@@ -23,6 +23,11 @@ const (
 	preflightStatusWarn      = "warn"
 	preflightStatusFail      = "fail"
 	preflightPromptProbeText = "This is a test. Reply with just 'OK'."
+
+	defaultPreflightAPIPromptProbeTimeout   = 30 * time.Second
+	defaultPreflightAPIPromptProbeRetries   = 2
+	defaultPreflightAPIPromptProbeBaseDelay = 500 * time.Millisecond
+	defaultPreflightAPIPromptProbeMaxDelay  = 5 * time.Second
 )
 
 type providerPreflightReport struct {
@@ -213,24 +218,180 @@ func runProviderAPIPreflight(ctx context.Context, g *model.Graph, runtimes map[s
 }
 
 func runProviderAPIPromptProbe(ctx context.Context, client *llm.Client, provider string, modelID string) (string, error) {
+	policy := preflightAPIPromptProbePolicyFromEnv()
+	return runProviderAPIPromptProbeWithPolicy(ctx, client, provider, modelID, policy)
+}
+
+type preflightAPIPromptProbePolicy struct {
+	Timeout   time.Duration
+	Retries   int
+	BaseDelay time.Duration
+	MaxDelay  time.Duration
+}
+
+func preflightAPIPromptProbePolicyFromEnv() preflightAPIPromptProbePolicy {
+	p := preflightAPIPromptProbePolicy{
+		Timeout:   defaultPreflightAPIPromptProbeTimeout,
+		Retries:   defaultPreflightAPIPromptProbeRetries,
+		BaseDelay: defaultPreflightAPIPromptProbeBaseDelay,
+		MaxDelay:  defaultPreflightAPIPromptProbeMaxDelay,
+	}
+	if ms := parseInt(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_API_PROMPT_PROBE_TIMEOUT_MS")), 0); ms > 0 {
+		p.Timeout = time.Duration(ms) * time.Millisecond
+	}
+	if retries := parseInt(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_API_PROMPT_PROBE_RETRIES")), p.Retries); retries >= 0 {
+		p.Retries = retries
+	}
+	if ms := parseInt(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_API_PROMPT_PROBE_BASE_DELAY_MS")), 0); ms > 0 {
+		p.BaseDelay = time.Duration(ms) * time.Millisecond
+	}
+	if ms := parseInt(strings.TrimSpace(os.Getenv("KILROY_PREFLIGHT_API_PROMPT_PROBE_MAX_DELAY_MS")), 0); ms > 0 {
+		p.MaxDelay = time.Duration(ms) * time.Millisecond
+	}
+	if p.MaxDelay < p.BaseDelay {
+		p.MaxDelay = p.BaseDelay
+	}
+	return p
+}
+
+func runProviderAPIPromptProbeWithPolicy(ctx context.Context, client *llm.Client, provider string, modelID string, policy preflightAPIPromptProbePolicy) (string, error) {
 	if client == nil {
 		return "", fmt.Errorf("api client is nil")
 	}
-	maxTokens := 16
-	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	resp, err := client.Complete(probeCtx, llm.Request{
-		Provider: provider,
-		Model:    modelID,
-		Messages: []llm.Message{
-			llm.User(preflightPromptProbeText),
-		},
-		MaxTokens: &maxTokens,
-	})
-	if err != nil {
-		return "", err
+	if policy.Timeout <= 0 {
+		policy.Timeout = defaultPreflightAPIPromptProbeTimeout
 	}
-	return strings.TrimSpace(resp.Text()), nil
+	if policy.Retries < 0 {
+		policy.Retries = 0
+	}
+	if policy.BaseDelay <= 0 {
+		policy.BaseDelay = defaultPreflightAPIPromptProbeBaseDelay
+	}
+	if policy.MaxDelay <= 0 {
+		policy.MaxDelay = defaultPreflightAPIPromptProbeMaxDelay
+	}
+	if policy.MaxDelay < policy.BaseDelay {
+		policy.MaxDelay = policy.BaseDelay
+	}
+
+	maxTokens := 16
+	var lastErr error
+	attempts := policy.Retries + 1
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, policy.Timeout)
+		resp, err := client.Complete(probeCtx, llm.Request{
+			Provider: provider,
+			Model:    modelID,
+			Messages: []llm.Message{
+				llm.User(preflightPromptProbeText),
+			},
+			MaxTokens: &maxTokens,
+		})
+		cancel()
+		if err == nil {
+			return strings.TrimSpace(resp.Text()), nil
+		}
+		lastErr = err
+		if attempt == attempts || !shouldRetryPreflightAPIPromptProbe(err) {
+			return "", err
+		}
+		delay := preflightAPIPromptProbeBackoff(policy, attempt-1)
+		if sleepErr := waitForPreflightProbeBackoff(ctx, delay); sleepErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			return "", sleepErr
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("api prompt probe failed")
+}
+
+func preflightAPIPromptProbeBackoff(policy preflightAPIPromptProbePolicy, retryAttempt int) time.Duration {
+	if retryAttempt < 0 {
+		retryAttempt = 0
+	}
+	delay := policy.BaseDelay
+	for i := 0; i < retryAttempt; i++ {
+		if delay >= policy.MaxDelay {
+			return policy.MaxDelay
+		}
+		delay *= 2
+	}
+	if delay > policy.MaxDelay {
+		return policy.MaxDelay
+	}
+	return delay
+}
+
+func waitForPreflightProbeBackoff(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func shouldRetryPreflightAPIPromptProbe(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var providerErr llm.Error
+	if errors.As(err, &providerErr) {
+		switch providerErr.StatusCode() {
+		case 400, 401, 403, 404, 413, 422:
+			return false
+		}
+		if providerErr.Retryable() {
+			return true
+		}
+		var timeoutErr *llm.RequestTimeoutError
+		if errors.As(err, &timeoutErr) {
+			return true
+		}
+		return false
+	}
+
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if msg == "" {
+		return false
+	}
+	for _, hint := range []string{
+		"context deadline exceeded",
+		"timeout",
+		"temporarily unavailable",
+		"connection refused",
+		"connection reset",
+		"rate limit",
+		"too many requests",
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
+		"eof",
+	} {
+		if strings.Contains(msg, hint) {
+			return true
+		}
+	}
+	return false
 }
 
 func runProviderCLIPreflightChecks(ctx context.Context, g *model.Graph, runtimes map[string]ProviderRuntime, cfg *RunConfigFile, opts RunOptions, report *providerPreflightReport, strictModelProbes bool) error {

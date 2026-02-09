@@ -249,6 +249,13 @@ API backend environment variables:
 - Kimi (Coding API key): `KIMI_API_KEY`
 - ZAI: `ZAI_API_KEY`
 
+API prompt-probe tuning (preflight):
+
+- `KILROY_PREFLIGHT_API_PROMPT_PROBE_TIMEOUT_MS` (default `30000`)
+- `KILROY_PREFLIGHT_API_PROMPT_PROBE_RETRIES` (default `2`, retries only transient failures)
+- `KILROY_PREFLIGHT_API_PROMPT_PROBE_BASE_DELAY_MS` (default `500`)
+- `KILROY_PREFLIGHT_API_PROMPT_PROBE_MAX_DELAY_MS` (default `5000`)
+
 Kimi compatibility note:
 
 - Built-in `kimi` defaults target Kimi Coding (`anthropic_messages`, `https://api.kimi.com/coding`).
