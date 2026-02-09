@@ -142,7 +142,7 @@ llm:
         protocol: openai_chat_completions
         api_key_env: ZAI_API_KEY
         base_url: https://api.z.ai
-        path: /api/paas/v4/chat/completions
+        path: /api/coding/paas/v4/chat/completions
         profile_family: openai
 
 modeldb:

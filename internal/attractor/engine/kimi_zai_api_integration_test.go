@@ -68,14 +68,14 @@ digraph G {
 	}
 
 	runCase("kimi", "kimi-k2.5", "KIMI_API_KEY", "/v1/chat/completions")
-	runCase("zai", "glm-4.7", "ZAI_API_KEY", "/api/paas/v4/chat/completions")
+	runCase("zai", "glm-4.7", "ZAI_API_KEY", "/api/coding/paas/v4/chat/completions")
 
 	mu.Lock()
 	defer mu.Unlock()
 	if seenPaths["/v1/chat/completions"] == 0 {
 		t.Fatalf("missing kimi chat-completions call: %v", seenPaths)
 	}
-	if seenPaths["/api/paas/v4/chat/completions"] == 0 {
+	if seenPaths["/api/coding/paas/v4/chat/completions"] == 0 {
 		t.Fatalf("missing zai chat-completions call: %v", seenPaths)
 	}
 }

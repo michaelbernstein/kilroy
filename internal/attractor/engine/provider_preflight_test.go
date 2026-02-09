@@ -713,6 +713,171 @@ echo "ok"
 	}
 }
 
+func TestRunWithConfig_PreflightPromptProbe_AllProvidersWhenGraphUsesAll(t *testing.T) {
+	t.Setenv("KILROY_PREFLIGHT_PROMPT_PROBES", "on")
+
+	repo := initTestRepo(t)
+	catalog := writeCatalogForPreflight(t, `{
+  "data": [
+    {"id": "openai/gpt-5.2"},
+    {"id": "anthropic/claude-sonnet-4-20250514"},
+    {"id": "google/gemini-3-pro-preview"},
+    {"id": "kimi/kimi-k2.5"},
+    {"id": "zai/glm-4.7"}
+  ]
+}`)
+
+	var openaiCalls atomic.Int32
+	var kimiCalls atomic.Int32
+	var zaiCalls atomic.Int32
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		if !strings.Contains(string(b), preflightPromptProbeText) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"missing preflight prompt probe text"}`))
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/responses":
+			openaiCalls.Add(1)
+		case "/v1/chat/completions":
+			kimiCalls.Add(1)
+		case "/api/coding/paas/v4/chat/completions":
+			zaiCalls.Add(1)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/responses" {
+			_, _ = w.Write([]byte(`{
+  "id":"resp_preflight",
+  "model":"gpt-5.2",
+  "output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],
+  "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+  "id":"chat_preflight",
+  "model":"m",
+  "choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"OK"}}],
+  "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+}`))
+	}))
+	defer apiSrv.Close()
+
+	claudeCLI := writeFakeCLI(t, "claude", "Usage: claude -p --output-format stream-json --verbose --model MODEL", 0)
+	geminiCLI := writeFakeCLI(t, "gemini", "Usage: gemini -p --output-format stream-json --yolo --model MODEL", 0)
+
+	t.Setenv("OPENAI_API_KEY", "k-openai")
+	t.Setenv("OPENAI_BASE_URL", apiSrv.URL)
+	t.Setenv("KIMI_API_KEY", "k-kimi")
+	t.Setenv("ZAI_API_KEY", "k-zai")
+
+	cfg := &RunConfigFile{Version: 1}
+	cfg.Repo.Path = repo
+	cfg.CXDB.BinaryAddr = "127.0.0.1:1"
+	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:1"
+	cfg.LLM.CLIProfile = "test_shim"
+	cfg.LLM.Providers = map[string]ProviderConfig{
+		"openai": {Backend: BackendAPI},
+		"anthropic": {
+			Backend:    BackendCLI,
+			Executable: claudeCLI,
+		},
+		"google": {
+			Backend:    BackendCLI,
+			Executable: geminiCLI,
+		},
+		"kimi": {
+			Backend: BackendAPI,
+			API: ProviderAPIConfig{
+				Protocol:      "openai_chat_completions",
+				BaseURL:       apiSrv.URL,
+				Path:          "/v1/chat/completions",
+				APIKeyEnv:     "KIMI_API_KEY",
+				ProfileFamily: "openai",
+			},
+		},
+		"zai": {
+			Backend: BackendAPI,
+			API: ProviderAPIConfig{
+				Protocol:      "openai_chat_completions",
+				BaseURL:       apiSrv.URL,
+				Path:          "/api/coding/paas/v4/chat/completions",
+				APIKeyEnv:     "ZAI_API_KEY",
+				ProfileFamily: "openai",
+			},
+		},
+	}
+	cfg.ModelDB.OpenRouterModelInfoPath = catalog
+	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
+	cfg.Git.RunBranchPrefix = "attractor/run"
+
+	dot := []byte(`
+digraph G {
+  graph [goal="test"]
+  start [shape=Mdiamond]
+  n1 [shape=box, llm_provider="openai", llm_model="gpt-5.2", prompt="x"]
+  n2 [shape=box, llm_provider="anthropic", llm_model="claude-sonnet-4-20250514", prompt="x"]
+  n3 [shape=box, llm_provider="google", llm_model="gemini-3-pro-preview", prompt="x"]
+  n4 [shape=box, llm_provider="kimi", llm_model="kimi-k2.5", prompt="x"]
+  n5 [shape=box, llm_provider="zai", llm_model="glm-4.7", prompt="x"]
+  exit [shape=Msquare]
+  start -> n1 -> n2 -> n3 -> n4 -> n5 -> exit
+}
+`)
+
+	logsRoot := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := RunWithConfig(ctx, dot, cfg, RunOptions{
+		RunID:         "preflight-all-providers",
+		LogsRoot:      logsRoot,
+		AllowTestShim: true,
+	})
+	if err == nil {
+		t.Fatalf("expected downstream cxdb error, got nil")
+	}
+	if strings.Contains(err.Error(), "preflight:") {
+		t.Fatalf("unexpected preflight failure: %v", err)
+	}
+
+	if openaiCalls.Load() == 0 {
+		t.Fatalf("expected openai preflight prompt probe request")
+	}
+	if kimiCalls.Load() == 0 {
+		t.Fatalf("expected kimi preflight prompt probe request")
+	}
+	if zaiCalls.Load() == 0 {
+		t.Fatalf("expected zai preflight prompt probe request")
+	}
+
+	report := mustReadPreflightReport(t, logsRoot)
+	wantProviders := map[string]bool{
+		"openai":    false,
+		"anthropic": false,
+		"google":    false,
+		"kimi":      false,
+		"zai":       false,
+	}
+	for _, check := range report.Checks {
+		if check.Name != "provider_prompt_probe" || check.Status != "pass" {
+			continue
+		}
+		if _, ok := wantProviders[check.Provider]; ok {
+			wantProviders[check.Provider] = true
+		}
+	}
+	for provider, seen := range wantProviders {
+		if !seen {
+			t.Fatalf("missing provider_prompt_probe pass check for %s", provider)
+		}
+	}
+}
+
 func singleProviderDot(provider, modelID string) []byte {
 	return []byte(fmt.Sprintf(`
 digraph G {

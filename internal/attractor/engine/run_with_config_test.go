@@ -245,7 +245,7 @@ func TestRunWithConfig_AcceptsKimiAndZaiAPIProviders(t *testing.T) {
 		path     string
 	}{
 		{provider: "kimi", model: "kimi-k2.5", keyEnv: "KIMI_API_KEY", path: "/v1/chat/completions"},
-		{provider: "zai", model: "glm-4.7", keyEnv: "ZAI_API_KEY", path: "/api/paas/v4/chat/completions"},
+		{provider: "zai", model: "glm-4.7", keyEnv: "ZAI_API_KEY", path: "/api/coding/paas/v4/chat/completions"},
 	}
 
 	for _, tc := range cases {

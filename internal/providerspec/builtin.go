@@ -79,7 +79,7 @@ var builtinSpecs = map[string]Spec{
 		API: &APISpec{
 			Protocol:           ProtocolOpenAIChatCompletions,
 			DefaultBaseURL:     "https://api.z.ai",
-			DefaultPath:        "/api/paas/v4/chat/completions",
+			DefaultPath:        "/api/coding/paas/v4/chat/completions",
 			DefaultAPIKeyEnv:   "ZAI_API_KEY",
 			ProviderOptionsKey: "zai",
 			ProfileFamily:      "openai",
