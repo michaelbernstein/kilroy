@@ -120,6 +120,10 @@ type Engine struct {
 	lastCheckpointSHA        string
 	terminalOutcomePersisted bool
 
+	// Deterministic failure cycle detection: tracks failure signatures across
+	// consecutive stages in the main loop. Resets on any successful stage.
+	loopFailureSignatures map[string]int
+
 	progressMu sync.Mutex
 
 	// Fidelity/session resolution state.
@@ -423,6 +427,49 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 		e.Context.Set("failure_reason", out.FailureReason)
 		failureClass := classifyFailureClass(out)
 		e.Context.Set("failure_class", failureClass)
+
+		// Deterministic failure cycle detection: track failure signatures
+		// across consecutive stages. On success, reset the tracker. On
+		// deterministic failure, increment the signature count and abort
+		// if the same signature has repeated too many times — this prevents
+		// infinite loops when, e.g., a provider auth token expires and
+		// every stage fails identically.
+		if isFailureLoopRestartOutcome(out) && normalizedFailureClassOrDefault(failureClass) == failureClassDeterministic {
+			sig := restartFailureSignature(node.ID, out, failureClass)
+			if sig != "" {
+				if e.loopFailureSignatures == nil {
+					e.loopFailureSignatures = map[string]int{}
+				}
+				e.loopFailureSignatures[sig]++
+				count := e.loopFailureSignatures[sig]
+				limit := loopRestartSignatureLimit(e.Graph)
+				e.appendProgress(map[string]any{
+					"event":           "deterministic_failure_cycle_check",
+					"node_id":         node.ID,
+					"signature":       sig,
+					"signature_count": count,
+					"signature_limit": limit,
+					"failure_class":   failureClass,
+					"failure_reason":  out.FailureReason,
+				})
+				if count >= limit {
+					reason := fmt.Sprintf(
+						"run aborted: deterministic failure cycle detected — signature %q repeated %d times (limit %d); likely a persistent provider or auth error",
+						sig, count, limit,
+					)
+					e.appendProgress(map[string]any{
+						"event":           "deterministic_failure_cycle_breaker",
+						"node_id":         node.ID,
+						"signature":       sig,
+						"signature_count": count,
+						"signature_limit": limit,
+					})
+					return nil, fmt.Errorf("%s", reason)
+				}
+			}
+		} else if out.Status == runtime.StatusSuccess {
+			e.loopFailureSignatures = nil // reset on success
+		}
 
 		// Checkpoint (git commit + checkpoint.json).
 		sha, err := e.checkpoint(node.ID, out, completed, nodeRetries)
