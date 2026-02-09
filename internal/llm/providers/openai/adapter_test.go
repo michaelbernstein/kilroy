@@ -89,6 +89,13 @@ func TestAdapter_Complete_MapsToResponsesAPI(t *testing.T) {
 	}
 }
 
+func TestOpenAIAdapter_NewWithProvider_UsesConfiguredName(t *testing.T) {
+	a := NewWithProvider("kimi", "k", "https://api.example.com")
+	if got := a.Name(); got != "kimi" {
+		t.Fatalf("Name()=%q want kimi", got)
+	}
+}
+
 func TestAdapter_Complete_ToolChoice_MappedPerSpec(t *testing.T) {
 	var gotBody map[string]any
 

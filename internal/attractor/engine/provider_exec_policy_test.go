@@ -3,6 +3,8 @@ package engine
 import (
 	"strings"
 	"testing"
+
+	"github.com/strongdm/kilroy/internal/providerspec"
 )
 
 func TestResolveProviderExecutable_RealRejectsEnvOverrides(t *testing.T) {
@@ -83,5 +85,16 @@ func TestResolveProviderExecutable_TestShimRequiresExplicitExecutable(t *testing
 	}
 	if !strings.Contains(err.Error(), "llm.providers.openai.executable") {
 		t.Fatalf("expected executable config key in error, got %v", err)
+	}
+}
+
+func TestDefaultCLIInvocation_UsesSpecTemplate(t *testing.T) {
+	spec := providerspec.CLISpec{
+		DefaultExecutable:  "mycli",
+		InvocationTemplate: []string{"run", "--model", "{{model}}", "--cwd", "{{worktree}}", "--prompt", "{{prompt}}"},
+	}
+	exe, args := materializeCLIInvocation(spec, "m1", "/tmp/w", "fix bug")
+	if exe != "mycli" || strings.Join(args, " ") != "run --model m1 --cwd /tmp/w --prompt fix bug" {
+		t.Fatalf("materialization mismatch: exe=%s args=%v", exe, args)
 	}
 }

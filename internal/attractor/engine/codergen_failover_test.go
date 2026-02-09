@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/strongdm/kilroy/internal/attractor/model"
 	"github.com/strongdm/kilroy/internal/attractor/modeldb"
 	"github.com/strongdm/kilroy/internal/llm"
+	"github.com/strongdm/kilroy/internal/providerspec"
 )
 
 type okAdapter struct{ name string }
@@ -143,5 +147,68 @@ func TestCodergenRouter_WithFailoverText_AppliesForceModelToFailoverProvider(t *
 	}
 	if used.Model != "claude-force-override" {
 		t.Fatalf("used model: got %q want %q", used.Model, "claude-force-override")
+	}
+}
+
+func TestProfileForRuntimeProvider_UsesConfiguredProfileFamily(t *testing.T) {
+	rt := ProviderRuntime{Key: "zai", ProfileFamily: "openai"}
+	p, err := profileForRuntimeProvider(rt, "glm-4.7")
+	if err != nil {
+		t.Fatalf("profileForRuntimeProvider: %v", err)
+	}
+	if p.ID() != "openai" {
+		t.Fatalf("expected openai family profile")
+	}
+}
+
+func TestFailoverOrder_UsesRuntimeProviderPolicy(t *testing.T) {
+	rt := map[string]ProviderRuntime{
+		"kimi": {Key: "kimi", Failover: []string{"zai", "openai"}},
+	}
+	got := failoverOrderFromRuntime("kimi", rt)
+	if strings.Join(got, ",") != "zai,openai" {
+		t.Fatalf("failover mismatch: %v", got)
+	}
+}
+
+func TestPickFailoverModelFromRuntime_NeverReturnsEmptyForConfiguredProvider(t *testing.T) {
+	rt := map[string]ProviderRuntime{
+		"zai": {Key: "zai"},
+	}
+	got := pickFailoverModelFromRuntime("zai", rt, nil, "glm-4.7")
+	if got != "glm-4.7" {
+		t.Fatalf("expected fallback model, got %q", got)
+	}
+}
+
+func TestEnsureAPIClient_UsesSyncOnce(t *testing.T) {
+	var calls atomic.Int32
+	r := NewCodergenRouterWithRuntimes(&RunConfigFile{}, nil, map[string]ProviderRuntime{
+		"openai": {
+			Key:     "openai",
+			Backend: BackendAPI,
+			API: providerspec.APISpec{
+				Protocol: providerspec.ProtocolOpenAIResponses,
+			},
+		},
+	})
+	r.apiClientFactory = func(map[string]ProviderRuntime) (*llm.Client, error) {
+		calls.Add(1)
+		c := llm.NewClient()
+		c.Register(&okAdapter{name: "openai"})
+		return c, nil
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = r.ensureAPIClient()
+		}()
+	}
+	wg.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("api client factory called %d times; want 1", calls.Load())
 	}
 }

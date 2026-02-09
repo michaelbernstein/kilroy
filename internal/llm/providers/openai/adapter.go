@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/strongdm/kilroy/internal/llm"
+	"github.com/strongdm/kilroy/internal/providerspec"
 )
 
 type Adapter struct {
+	Provider string
 	APIKey  string
 	BaseURL string
 	Client  *http.Client
@@ -38,19 +40,33 @@ func NewFromEnv() (*Adapter, error) {
 	if key == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY is required")
 	}
-	base := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	return NewWithProvider("openai", key, os.Getenv("OPENAI_BASE_URL")), nil
+}
+
+func NewWithProvider(provider, apiKey, baseURL string) *Adapter {
+	p := providerspec.CanonicalProviderKey(provider)
+	if p == "" {
+		p = "openai"
+	}
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
 		base = "https://api.openai.com"
 	}
 	return &Adapter{
-		APIKey:  key,
-		BaseURL: strings.TrimRight(base, "/"),
+		Provider: p,
+		APIKey:   strings.TrimSpace(apiKey),
+		BaseURL:  base,
 		// Avoid short client-level timeouts; rely on request context deadlines instead.
 		Client: &http.Client{Timeout: 0},
-	}, nil
+	}
 }
 
-func (a *Adapter) Name() string { return "openai" }
+func (a *Adapter) Name() string {
+	if p := providerspec.CanonicalProviderKey(a.Provider); p != "" {
+		return p
+	}
+	return "openai"
+}
 
 func (a *Adapter) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
 	if a.Client == nil {
@@ -137,10 +153,10 @@ func (a *Adapter) Complete(ctx context.Context, req llm.Request) (llm.Response, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		ra := llm.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		msg := fmt.Sprintf("responses.create failed: %v", raw)
-		return llm.Response{}, llm.ErrorFromHTTPStatus("openai", resp.StatusCode, msg, raw, ra)
+		return llm.Response{}, llm.ErrorFromHTTPStatus(a.Name(), resp.StatusCode, msg, raw, ra)
 	}
 
-	return fromResponses(raw, req.Model), nil
+	return fromResponses(a.Name(), raw, req.Model), nil
 }
 
 func (a *Adapter) Stream(ctx context.Context, req llm.Request) (llm.Stream, error) {
@@ -219,7 +235,7 @@ func (a *Adapter) Stream(ctx context.Context, req llm.Request) (llm.Stream, erro
 	resp, err := a.Client.Do(httpReq)
 	if err != nil {
 		cancel()
-		return nil, llm.WrapContextError("openai", err)
+		return nil, llm.WrapContextError(a.Name(), err)
 	}
 
 	// Handle non-2xx immediately.
@@ -232,7 +248,7 @@ func (a *Adapter) Stream(ctx context.Context, req llm.Request) (llm.Stream, erro
 		ra := llm.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		msg := fmt.Sprintf("responses.create(stream) failed: %v", raw)
 		cancel()
-		return nil, llm.ErrorFromHTTPStatus("openai", resp.StatusCode, msg, raw, ra)
+		return nil, llm.ErrorFromHTTPStatus(a.Name(), resp.StatusCode, msg, raw, ra)
 	}
 
 	s := llm.NewChanStream(cancel)
@@ -381,7 +397,7 @@ func (a *Adapter) Stream(ctx context.Context, req llm.Request) (llm.Stream, erro
 				if rawResp == nil {
 					rawResp = payload
 				}
-				r := fromResponses(rawResp, req.Model)
+				r := fromResponses(a.Name(), rawResp, req.Model)
 				// Ensure text segment is closed.
 				if textStarted {
 					s.Send(llm.StreamEvent{Type: llm.StreamEventTextEnd, TextID: textID})
@@ -400,7 +416,7 @@ func (a *Adapter) Stream(ctx context.Context, req llm.Request) (llm.Stream, erro
 
 		if !finished {
 			if err := sctx.Err(); err != nil {
-				s.Send(llm.StreamEvent{Type: llm.StreamEventError, Err: llm.WrapContextError("openai", err)})
+				s.Send(llm.StreamEvent{Type: llm.StreamEventError, Err: llm.WrapContextError(a.Name(), err)})
 			}
 		}
 	}()
@@ -673,10 +689,10 @@ func toResponsesInput(msgs []llm.Message) (instructions string, items []any, _ e
 	return instructions, items, nil
 }
 
-func fromResponses(raw map[string]any, requestedModel string) llm.Response {
+func fromResponses(provider string, raw map[string]any, requestedModel string) llm.Response {
 	// Best-effort mapping. OpenAI Responses output is a list of typed items.
 	r := llm.Response{
-		Provider: "openai",
+		Provider: provider,
 		Model:    requestedModel,
 		Raw:      raw,
 	}

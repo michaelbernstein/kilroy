@@ -38,7 +38,7 @@ This implementation is based on the Attractor specification by StrongDM at `http
 | Graph DSL + engine semantics | DOT schema, handler model, edge selection, retry, conditions, context fidelity | Concrete Go engine implementation details and defaults |
 | Coding-agent loop | Session model, tool loop behavior, provider-aligned tool concepts | Local tool execution wiring and CLI/API backend routing choices |
 | Unified LLM model | Provider-neutral request/response/tool/streaming contracts | Concrete provider adapters and environment wiring |
-| Provider support | Conceptual provider abstraction | v1 provider set: OpenAI, Anthropic, Google |
+| Provider support | Conceptual provider abstraction | Provider plug-in runtime with built-ins: OpenAI, Anthropic, Google, Kimi, ZAI |
 | Backend selection | Spec allows flexible backend choices | Backend is mandatory per provider (`api`/`cli`), no implicit defaults |
 | Checkpointing + persistence | Attractor/CXDB contracts | Required git branch/worktree/commit-per-node and concrete artifact layout |
 | Ingestion | Ingestor behavior described in spec docs | `attractor ingest` implementation: Claude CLI + `english-to-dotfile` skill |
@@ -128,6 +128,22 @@ llm:
       backend: api
     google:
       backend: api
+    kimi:
+      backend: api
+      api:
+        protocol: openai_chat_completions
+        api_key_env: KIMI_API_KEY
+        base_url: https://api.moonshot.ai
+        path: /v1/chat/completions
+        profile_family: openai
+    zai:
+      backend: api
+      api:
+        protocol: openai_chat_completions
+        api_key_env: ZAI_API_KEY
+        base_url: https://api.z.ai
+        path: /api/paas/v4/chat/completions
+        profile_family: openai
 
 modeldb:
   openrouter_model_info_path: /absolute/path/to/kilroy/internal/attractor/modeldb/pinned/openrouter_models.json
@@ -204,6 +220,13 @@ If autostart is used, startup logs are written under `{logs_root}`:
 
 ## Provider Setup
 
+Provider runtime architecture:
+
+- Providers are protocol-driven and configured under `llm.providers.<provider>`.
+- Built-ins include `openai`, `anthropic`, `google`, `kimi`, and `zai`.
+- CLI contracts are built-in for `openai`, `anthropic`, and `google`.
+- `kimi` and `zai` are API-only in this release.
+
 CLI backend command mappings:
 
 - `openai` -> `codex exec --json --sandbox workspace-write ...`
@@ -221,6 +244,8 @@ API backend environment variables:
 - OpenAI: `OPENAI_API_KEY` (`OPENAI_BASE_URL` optional)
 - Anthropic: `ANTHROPIC_API_KEY` (`ANTHROPIC_BASE_URL` optional)
 - Google: `GEMINI_API_KEY` or `GOOGLE_API_KEY` (`GEMINI_BASE_URL` optional)
+- Kimi: `KIMI_API_KEY`
+- ZAI: `ZAI_API_KEY`
 
 ## Run Artifacts
 

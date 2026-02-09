@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/strongdm/kilroy/internal/providerspec"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,9 +19,21 @@ const (
 	BackendCLI BackendKind = "cli"
 )
 
+type ProviderAPIConfig struct {
+	Protocol           string            `json:"protocol,omitempty" yaml:"protocol,omitempty"`
+	BaseURL            string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Path               string            `json:"path,omitempty" yaml:"path,omitempty"`
+	APIKeyEnv          string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	ProviderOptionsKey string            `json:"provider_options_key,omitempty" yaml:"provider_options_key,omitempty"`
+	ProfileFamily      string            `json:"profile_family,omitempty" yaml:"profile_family,omitempty"`
+	Headers            map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+}
+
 type ProviderConfig struct {
-	Backend    BackendKind `json:"backend" yaml:"backend"`
-	Executable string      `json:"executable,omitempty" yaml:"executable,omitempty"`
+	Backend    BackendKind       `json:"backend" yaml:"backend"`
+	Executable string            `json:"executable,omitempty" yaml:"executable,omitempty"`
+	API        ProviderAPIConfig `json:"api,omitempty" yaml:"api,omitempty"`
+	Failover   []string          `json:"failover,omitempty" yaml:"failover,omitempty"`
 }
 
 type RunConfigFile struct {
@@ -178,14 +192,21 @@ func validateConfig(cfg *RunConfigFile) error {
 		return fmt.Errorf("invalid llm.cli_profile: %q (want real|test_shim)", cfg.LLM.CLIProfile)
 	}
 	for prov, pc := range cfg.LLM.Providers {
-		switch normalizeProviderKey(prov) {
-		case "openai", "anthropic", "google":
-			// ok
-		default:
-			return fmt.Errorf("unsupported provider in config: %q", prov)
-		}
+		canonical := providerspec.CanonicalProviderKey(prov)
+		builtin, hasBuiltin := providerspec.Builtin(canonical)
 		switch pc.Backend {
-		case BackendAPI, BackendCLI:
+		case BackendAPI:
+			protocol := strings.TrimSpace(pc.API.Protocol)
+			if protocol == "" && hasBuiltin && builtin.API != nil {
+				protocol = string(builtin.API.Protocol)
+			}
+			if protocol == "" {
+				return fmt.Errorf("llm.providers.%s.api.protocol is required for api backend", prov)
+			}
+		case BackendCLI:
+			if !hasBuiltin || builtin.CLI == nil {
+				return fmt.Errorf("llm.providers.%s backend=cli requires builtin provider with cli contract", prov)
+			}
 		default:
 			return fmt.Errorf("invalid backend for provider %q: %q (want api|cli)", prov, pc.Backend)
 		}
@@ -197,13 +218,7 @@ func validateConfig(cfg *RunConfigFile) error {
 }
 
 func normalizeProviderKey(k string) string {
-	k = strings.ToLower(strings.TrimSpace(k))
-	switch k {
-	case "gemini":
-		return "google"
-	default:
-		return k
-	}
+	return providerspec.CanonicalProviderKey(k)
 }
 
 func trimNonEmpty(parts []string) []string {

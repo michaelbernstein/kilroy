@@ -103,6 +103,15 @@ func TestNormalizeProviderKey_GeminiMapsToGoogle(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderKey_DelegatesToProviderSpecAliases(t *testing.T) {
+	if got := normalizeProviderKey("z-ai"); got != "zai" {
+		t.Fatalf("normalizeProviderKey(z-ai)=%q want zai", got)
+	}
+	if got := normalizeProviderKey("moonshot"); got != "kimi" {
+		t.Fatalf("normalizeProviderKey(moonshot)=%q want kimi", got)
+	}
+}
+
 func TestLoadRunConfigFile_CXDBAutostartDefaultsAndTrim(t *testing.T) {
 	dir := t.TempDir()
 	yml := filepath.Join(dir, "run.yaml")
@@ -225,6 +234,110 @@ modeldb:
 	}
 	if got := cfg.LLM.CLIProfile; got != "real" {
 		t.Fatalf("cli_profile=%q want real", got)
+	}
+}
+
+func loadRunConfigFromBytesForTest(t *testing.T, yml []byte) (*RunConfigFile, error) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "run.yaml")
+	if err := os.WriteFile(p, yml, 0o644); err != nil {
+		t.Fatalf("write run.yaml: %v", err)
+	}
+	return LoadRunConfigFile(p)
+}
+
+func TestLoadRunConfig_CustomAPIProviderRequiresProtocol(t *testing.T) {
+	yml := []byte(`
+version: 1
+repo: { path: /tmp/repo }
+cxdb: { binary_addr: 127.0.0.1:9009, http_base_url: http://127.0.0.1:9010 }
+modeldb: { openrouter_model_info_path: /tmp/catalog.json }
+llm:
+  providers:
+    acme:
+      backend: api
+`)
+	_, err := loadRunConfigFromBytesForTest(t, yml)
+	if err == nil || !strings.Contains(err.Error(), "llm.providers.acme.api.protocol") {
+		t.Fatalf("expected protocol validation error, got %v", err)
+	}
+}
+
+func TestLoadRunConfig_KimiAPIProtocolAccepted(t *testing.T) {
+	yml := []byte(`
+version: 1
+repo: { path: /tmp/repo }
+cxdb: { binary_addr: 127.0.0.1:9009, http_base_url: http://127.0.0.1:9010 }
+modeldb: { openrouter_model_info_path: /tmp/catalog.json }
+llm:
+  providers:
+    kimi:
+      backend: api
+      api:
+        protocol: openai_chat_completions
+        api_key_env: KIMI_API_KEY
+        base_url: https://api.moonshot.ai
+        path: /v1/chat/completions
+`)
+	cfg, err := loadRunConfigFromBytesForTest(t, yml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.LLM.Providers["kimi"].API.Protocol; got != "openai_chat_completions" {
+		t.Fatalf("protocol not parsed: %q", got)
+	}
+}
+
+func TestLoadRunConfig_ZAIAliasAcceptedWithAPIProtocol(t *testing.T) {
+	yml := []byte(`
+version: 1
+repo: { path: /tmp/repo }
+cxdb: { binary_addr: 127.0.0.1:9009, http_base_url: http://127.0.0.1:9010 }
+modeldb: { openrouter_model_info_path: /tmp/catalog.json }
+llm:
+  providers:
+    z-ai:
+      backend: api
+      api:
+        protocol: openai_chat_completions
+        api_key_env: ZAI_API_KEY
+`)
+	if _, err := loadRunConfigFromBytesForTest(t, yml); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRunConfig_BackwardCompatibleBuiltinProvidersStillValid(t *testing.T) {
+	yml := []byte(`
+version: 1
+repo: { path: /tmp/repo }
+cxdb: { binary_addr: 127.0.0.1:9009, http_base_url: http://127.0.0.1:9010 }
+modeldb: { openrouter_model_info_path: /tmp/catalog.json }
+llm:
+  providers:
+    openai: { backend: api }
+    anthropic: { backend: api }
+    google: { backend: api }
+`)
+	if _, err := loadRunConfigFromBytesForTest(t, yml); err != nil {
+		t.Fatalf("unexpected backward-compat validation error: %v", err)
+	}
+}
+
+func TestBackwardCompatibility_OpenAIAnthropicGoogleStillValid(t *testing.T) {
+	cfg := &RunConfigFile{Version: 1}
+	cfg.Repo.Path = "/tmp/repo"
+	cfg.CXDB.BinaryAddr = "127.0.0.1:9009"
+	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:9010"
+	cfg.ModelDB.OpenRouterModelInfoPath = "/tmp/catalog.json"
+	cfg.LLM.Providers = map[string]ProviderConfig{
+		"openai":    {Backend: BackendAPI},
+		"anthropic": {Backend: BackendAPI},
+		"google":    {Backend: BackendAPI},
+	}
+	applyConfigDefaults(cfg)
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
 	}
 }
 

@@ -9,6 +9,7 @@ Although bringing your own agentic loop and unified LLM SDK is not required to b
 - [Attractor Specification](./attractor-spec.md)
 - [Coding Agent Loop Specification](./coding-agent-loop-spec.md)
 - [Unified LLM Client Specification](./unified-llm-spec.md)
+- [Provider Plug-in Migration](./provider-plugin-migration.md)
 - [Reliability Troubleshooting Runbook](./reliability-troubleshooting.md)
 
 ## Runbook Notes
@@ -41,6 +42,10 @@ Although bringing your own agentic loop and unified LLM SDK is not required to b
   - Always writes `<logs_root>/preflight_report.json` (pass/warn/fail checks and summary).
   - `KILROY_PREFLIGHT_STRICT_CAPABILITIES=1` turns capability-probe failures into hard preflight failures.
   - `KILROY_PREFLIGHT_CAPABILITY_PROBES=off` disables capability probing and keeps binary-presence checks only.
+- Provider plug-ins (runtime metadata):
+  - Providers are resolved through runtime metadata (protocol family + backend + failover), not hard-coded provider switches.
+  - Built-ins: `openai`, `anthropic`, `google`, `kimi`, `zai`.
+  - `kimi` and `zai` are API-only in this release (`openai_chat_completions` protocol).
 - Real vs test-shim execution:
   - `llm.cli_profile` defaults to `real` and rejects `KILROY_CODEX_PATH`, `KILROY_CLAUDE_PATH`, `KILROY_GEMINI_PATH` overrides.
   - Test-shim mode requires both `llm.cli_profile: test_shim` and per-provider `executable` config.

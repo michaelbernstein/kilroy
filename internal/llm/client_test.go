@@ -76,6 +76,15 @@ func TestClient_ProviderAlias_GeminiRoutesToGoogle(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderName_DelegatesToProviderSpecAliases(t *testing.T) {
+	if got := normalizeProviderName("gemini"); got != "google" {
+		t.Fatalf("normalizeProviderName(gemini)=%q want google", got)
+	}
+	if got := normalizeProviderName("z-ai"); got != "zai" {
+		t.Fatalf("normalizeProviderName(z-ai)=%q want zai", got)
+	}
+}
+
 func TestClient_UnknownProviderError(t *testing.T) {
 	c := NewClient()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

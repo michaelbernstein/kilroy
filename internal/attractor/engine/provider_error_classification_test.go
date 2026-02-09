@@ -2,8 +2,11 @@ package engine
 
 import (
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/strongdm/kilroy/internal/providerspec"
 )
 
 func TestClassifyProviderCLIError_AnthropicStreamJSONRequiresVerbose(t *testing.T) {
@@ -63,5 +66,32 @@ func TestClassifyProviderCLIError_UnknownFallbackIsDeterministic(t *testing.T) {
 	}
 	if !strings.HasPrefix(got.FailureSignature, "provider_failure|anthropic|unknown") {
 		t.Fatalf("FailureSignature: got %q", got.FailureSignature)
+	}
+}
+
+func TestClassifyProviderCLIErrorWithContract_ExecutableMissing(t *testing.T) {
+	got := classifyProviderCLIErrorWithContract(
+		"openai",
+		nil,
+		"",
+		&exec.Error{Name: "codex", Err: errors.New("not found")},
+	)
+	if got.Kind != providerCLIErrorKindExecutableMissing {
+		t.Fatalf("Kind: got %q want %q", got.Kind, providerCLIErrorKindExecutableMissing)
+	}
+}
+
+func TestClassifyProviderCLIErrorWithContract_CapabilityMissing(t *testing.T) {
+	spec := &providerspec.CLISpec{
+		CapabilityAll: []string{"--json", "--sandbox"},
+	}
+	got := classifyProviderCLIErrorWithContract(
+		"openai",
+		spec,
+		"error: unknown option --foo",
+		errors.New("exit status 2"),
+	)
+	if got.Kind != providerCLIErrorKindCapabilityMissing {
+		t.Fatalf("Kind: got %q want %q", got.Kind, providerCLIErrorKindCapabilityMissing)
 	}
 }

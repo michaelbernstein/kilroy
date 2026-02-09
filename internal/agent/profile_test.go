@@ -157,3 +157,28 @@ func assertToolListExact(t *testing.T, p ProviderProfile, want []string) {
 		t.Fatalf("tool list mismatch for profile %q:\n got: %v\nwant: %v", p.ID(), got, want)
 	}
 }
+
+func TestNewProfileForFamily_DefaultFamiliesAndRegistration(t *testing.T) {
+	p, err := NewProfileForFamily("openai", "gpt-5")
+	if err != nil {
+		t.Fatalf("NewProfileForFamily(openai): %v", err)
+	}
+	if p.ID() != "openai" {
+		t.Fatalf("openai profile id=%q want openai", p.ID())
+	}
+
+	RegisterProfileFamily("custom", func(model string) ProviderProfile {
+		return NewOpenAIProfile(model)
+	})
+	p2, err := NewProfileForFamily("custom", "m2")
+	if err != nil {
+		t.Fatalf("NewProfileForFamily(custom): %v", err)
+	}
+	if p2.ID() != "openai" {
+		t.Fatalf("custom profile id=%q want openai", p2.ID())
+	}
+
+	if _, err := NewProfileForFamily("missing-family", "m3"); err == nil {
+		t.Fatalf("expected unsupported family error")
+	}
+}

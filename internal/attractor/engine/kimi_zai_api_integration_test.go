@@ -1,0 +1,81 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestKimiAndZai_OpenAIChatCompletionsIntegration(t *testing.T) {
+	repo := initTestRepo(t)
+	logsRoot := t.TempDir()
+	pinned := writeProviderCatalogForTest(t)
+	cxdbSrv := newCXDBTestServer(t)
+
+	var mu sync.Mutex
+	seenPaths := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenPaths[r.URL.Path]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer srv.Close()
+
+	runCase := func(provider, model, keyEnv, path string) {
+		t.Helper()
+		cfg := &RunConfigFile{Version: 1}
+		cfg.Repo.Path = repo
+		cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
+		cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
+		cfg.ModelDB.OpenRouterModelInfoPath = pinned
+		cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
+		cfg.Git.RunBranchPrefix = "attractor/run"
+		cfg.LLM.Providers = map[string]ProviderConfig{
+			provider: {
+				Backend: BackendAPI,
+				API: ProviderAPIConfig{
+					Protocol:      "openai_chat_completions",
+					APIKeyEnv:     keyEnv,
+					BaseURL:       srv.URL,
+					Path:          path,
+					ProfileFamily: "openai",
+				},
+			},
+		}
+		t.Setenv(keyEnv, "k")
+
+		dot := []byte(fmt.Sprintf(`
+digraph G {
+  start [shape=Mdiamond]
+  exit  [shape=Msquare]
+  a [shape=box, llm_provider=%s, llm_model=%s, codergen_mode=one_shot, auto_status=true, prompt="say hi"]
+  start -> a -> exit
+}
+`, provider, model))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "kz-" + provider, LogsRoot: logsRoot})
+		if err != nil {
+			t.Fatalf("%s run failed: %v", provider, err)
+		}
+	}
+
+	runCase("kimi", "kimi-k2.5", "KIMI_API_KEY", "/v1/chat/completions")
+	runCase("zai", "glm-4.7", "ZAI_API_KEY", "/api/paas/v4/chat/completions")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seenPaths["/v1/chat/completions"] == 0 {
+		t.Fatalf("missing kimi chat-completions call: %v", seenPaths)
+	}
+	if seenPaths["/api/paas/v4/chat/completions"] == 0 {
+		t.Fatalf("missing zai chat-completions call: %v", seenPaths)
+	}
+}

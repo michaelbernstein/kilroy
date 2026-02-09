@@ -50,10 +50,14 @@ We are implementing StrongDM’s Attractor in Go inside this repo, with these to
 
 ### 3.2 Providers and Backends (v1)
 
-- Providers supported in v1: **OpenAI**, **Anthropic**, **Google (Gemini)**.
+- Provider plug-in runtime built-ins in v1: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Kimi**, **ZAI**.
 - Backends supported in v1:
-  - `api`: call provider APIs using the provider’s **official Go SDKs** (or direct HTTP where required).
+  - `api`: call provider APIs through protocol-family adapters (provider SDKs and/or direct HTTP, depending on protocol).
   - `cli`: spawn provider CLIs as subprocesses and ingest their JSON/JSONL outputs.
+
+API-only in v1:
+
+- `kimi` and `zai` are API-only providers (`openai_chat_completions` protocol family).
 
 **No implicit backend defaults:**
 
@@ -159,6 +163,22 @@ llm:
       backend: cli   # api|cli
     google:
       backend: api   # api|cli
+    kimi:
+      backend: api
+      api:
+        protocol: openai_chat_completions
+        api_key_env: KIMI_API_KEY
+        base_url: https://api.moonshot.ai
+        path: /v1/chat/completions
+        profile_family: openai
+    zai:
+      backend: api
+      api:
+        protocol: openai_chat_completions
+        api_key_env: ZAI_API_KEY
+        base_url: https://api.z.ai
+        path: /api/paas/v4/chat/completions
+        profile_family: openai
 
 modeldb:
   # Local path to the pinned OpenRouter model info JSON.
@@ -285,11 +305,11 @@ Kilroy rule:
 
 - If `llm_provider` is missing after stylesheet resolution, the run MUST fail (no provider auto-detection).
 
-### 7.2 API Backend (Provider SDKs)
+### 7.2 API Backend (Protocol Adapters)
 
 When `backend(provider)=api`:
 
-- Calls MUST use the provider’s official Go SDKs (or direct HTTP) to implement the `unified-llm-spec.md` interfaces.
+- Calls MUST use protocol-family adapters that implement `unified-llm-spec.md` interfaces.
 - The Unified LLM interface is the host contract; provider-specific features flow through `provider_options` (per `unified-llm-spec.md`).
 
 ### 7.3 CLI Backend (Subprocess Agents)
