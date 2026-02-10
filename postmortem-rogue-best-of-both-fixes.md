@@ -42,6 +42,7 @@ Source analyses:
 ## Runtime Data Model Definitions (Must Be Explicit Before Coding)
 
 - These are runtime-contract definitions (not currently specified in attractor/coding-agent-loop/unified-llm specs).
+- These are new data-model additions relative to current runtime and require coordinated changes across event emission, status payloads, and ingestion.
 - `run_generation`: monotonic integer incremented on each loop-restart generation of a run; included on liveness events to avoid stale-branch attribution.
 - `run_generation` reconciliation: each `loop_restart` creates a fresh physical run directory, but this counter tracks logical lineage across those generations.
 - `branch_id`: stable branch scope identifier (`main` for top-level path; deterministic fanout branch key for parallel branches).
@@ -65,6 +66,7 @@ Source analyses:
 ## Runtime Event Contract (Used By This Plan, Then Codified)
 
 The events below are treated as runtime implementation contracts for this fix plan and must later be codified in spec deltas.
+These `api_*` event names are new events to introduce (they do not exist today).
 Naming bridge:
 - `api_tool_call_start` corresponds to coding-agent-loop `TOOL_CALL_START`.
 - `api_tool_call_end` corresponds to coding-agent-loop `TOOL_CALL_END`.
@@ -109,6 +111,7 @@ Proposed liveness event set for watchdog:
 - Make watchdog liveness fanout-aware.
   - Done when: no false `stall_watchdog_timeout` while any active branch emits accepted liveness events.
   - Coverage must include join policies: `wait_all`, `k_of_n`, `first_success`, `quorum`.
+  - Implementation note: runtime currently does not implement all spec join policies; where unsupported today, add guardrail tests that lock current behavior and add explicit TODO gates before enabling policy-specific watchdog logic.
   - Policy expectations per join mode:
   - `wait_all`: any active branch liveness resets parent watchdog.
   - `k_of_n` and `quorum`: liveness from undecided branches resets parent watchdog until threshold is reached and branch set is finalized.
@@ -119,7 +122,7 @@ Proposed liveness event set for watchdog:
 - Add cancellation guards in subgraph/parallel traversal.
   - Done when: after run cancel, no new attempts start and traversal exits without selecting another edge.
   - Clarification: `error_policy=ignore` never suppresses run-level cancellation.
-- Extend deterministic cycle-break handling to subgraph path.
+- Implement deterministic cycle-break handling in subgraph path (new capability; parity target with top-level loop policy).
   - Done when: deterministic signature repetition triggers breaker using configured `loop_restart_signature_limit`.
 - Preserve failure causality through routing.
   - Done when: terminal outputs retain upstream raw reason; normalized signature is separate metadata.
@@ -224,10 +227,11 @@ Proposed liveness event set for watchdog:
 - Legacy fallback status contract (`worktree/status.json`, `.ai/status.json`) + deprecation plan.
 - Explicit pinned-model failover policy contract.
 - Canonical outcome casing contract.
+- Graph attribute contract for `loop_restart_signature_limit` (name, type, default, semantics).
 
 ## Implementation Order (Risk-Aware)
 
-- Stage 1: atomic artifact write hardening (`status.json` and `final.json`) + status ingestion ownership checks.
+- Stage 1: atomic artifact write hardening (`status.json`, `final.json`, `checkpoint.json`, `live.json`) + status ingestion ownership checks.
 - Stage 2: draft spec deltas for status/casing/cancel/watchdog/event contracts (before broad behavior rollout).
 - Stage 3: watchdog fanout aggregation + heartbeat lifecycle fixes.
 - Stage 4: cancellation guards + subgraph cycle-break parity.
@@ -239,13 +243,14 @@ Proposed liveness event set for watchdog:
 
 Implementation:
 - `internal/attractor/engine/handlers.go`
-- `internal/attractor/runtime/status.go`
+- `internal/attractor/runtime/status.go` (status parsing/normalization only; no file I/O)
 - `internal/attractor/engine/progress.go`
 - `internal/attractor/engine/engine.go`
 - `internal/attractor/engine/subgraph.go`
 - `internal/attractor/engine/parallel_handlers.go`
 - `internal/attractor/engine/codergen_router.go`
 - `internal/attractor/runtime/final.go`
+- `internal/attractor/runtime/checkpoint.go`
 
 Tests:
 - `internal/attractor/engine/engine_stall_watchdog_test.go`
