@@ -165,8 +165,9 @@ func (h *CodergenHandler) Execute(ctx context.Context, exec *Execution, node *mo
 	worktreeStatusPath := ""
 	if exec != nil && strings.TrimSpace(exec.WorktreeDir) != "" {
 		worktreeStatusPath = filepath.Join(exec.WorktreeDir, "status.json")
-		// Clear any stale file from a prior stage so we don't accidentally attribute it.
+		// Clear any stale files from a prior stage so we don't accidentally attribute them.
 		_ = os.Remove(worktreeStatusPath)
+		_ = os.Remove(filepath.Join(exec.WorktreeDir, ".ai", "status.json"))
 	}
 
 	basePrompt := strings.TrimSpace(node.Prompt())
@@ -225,13 +226,22 @@ func (h *CodergenHandler) Execute(ctx context.Context, exec *Execution, node *mo
 
 	// If the backend/agent wrote a worktree-root status.json, surface it to the engine by
 	// copying it into the authoritative stage directory location.
+	// Also check .ai/status.json since agents often write there when the prompt context
+	// mentions .ai/ paths (e.g., ".ai/verify.md").
 	if worktreeStatusPath != "" {
 		if _, statErr := os.Stat(stageStatusPath); statErr != nil {
-			if b, readErr := os.ReadFile(worktreeStatusPath); readErr == nil {
-				if writeErr := os.WriteFile(stageStatusPath, b, 0o644); writeErr != nil {
-					return runtime.Outcome{Status: runtime.StatusFail, FailureReason: writeErr.Error()}, nil
+			statusCandidates := []string{
+				worktreeStatusPath,
+				filepath.Join(exec.WorktreeDir, ".ai", "status.json"),
+			}
+			for _, candidate := range statusCandidates {
+				if b, readErr := os.ReadFile(candidate); readErr == nil {
+					if writeErr := os.WriteFile(stageStatusPath, b, 0o644); writeErr != nil {
+						return runtime.Outcome{Status: runtime.StatusFail, FailureReason: writeErr.Error()}, nil
+					}
+					_ = os.Remove(candidate)
+					break
 				}
-				_ = os.Remove(worktreeStatusPath)
 			}
 		}
 	}
