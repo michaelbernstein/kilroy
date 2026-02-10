@@ -1,94 +1,139 @@
-# Rogue Runs: Best-of-Both Fix Plan
+# Rogue Runs (Fast + Slow): Best-of-Both Fix Plan
 
-## Core invariants (must hold after fixes)
+This plan consolidates fixes from both rogue-fast and rogue-slow postmortems, then cross-checks them against `coding-agent-loop-spec`, `attractor-spec`, and `unified-llm-spec`.
 
-- Active branch work must always count as parent-run progress.
-- No stage may emit progress after its attempt has ended.
-- Canceled runs must converge quickly to terminal state.
-- Fail outcomes must preserve causal `failure_reason` across routing nodes.
-- Stage status must be owned by the same stage/attempt that consumes it.
-- Every run that terminates via controllable engine paths must persist an explicit top-level terminal artifact (`final.json`).
+## Core invariants (formal and testable)
+
+- **Parent liveness invariant:** while any active fanout branch emits progress for the current run generation, parent watchdog idle time must reset.
+  - Progress sources (explicit): `stage_attempt_start`, `stage_attempt_end`, `stage_progress`, `stage_heartbeat`, and branch completion events.
+- **Attempt ownership invariant:** a stage attempt may read only status produced by the same `(run_id, node_id, attempt_id)` tuple.
+- **Heartbeat lifecycle invariant:** no heartbeat may be emitted after `stage_attempt_end` for the same attempt tuple.
+- **Cancellation convergence invariant:** after run-level cancellation is observed, branch loops must stop within `max(2 scheduler iterations, 5s wall time)`.
+- **Failure-causality invariant:** routing/check nodes must preserve upstream `failure_reason`; if classification is added, preserve both raw and classified forms.
+- **Terminal artifact invariant:** all controllable terminal paths (success/fail/cancel/watchdog/internal fatal) must persist top-level terminal outcome artifacts.
 
 ## Spec alignment guardrails (idiomatic Attractor/Kilroy path)
 
-- Keep the canonical stage outcome contract from metaspec: `{logs_root}/{node_id}/status.json` is authoritative, statuses remain canonical lowercase, and `failure_reason` stays non-empty for `fail`/`retry`.
-- Treat `.ai/status.json` as a legacy compatibility input only; never replace canonical stage-directory `status.json` as the source of routing truth.
-- Preserve edge-routing semantics (condition evaluation, retry-target/fallback behavior, and deterministic tie-break order); do not introduce special-case routing shortcuts.
-- Preserve parallel isolation semantics: branch-local git branch/worktree + CXDB fork, with fan-in selecting one winner via ff-only integration.
-- Preserve artifact persistence expectations: `checkpoint.json`, stage artifacts, and top-level `final.json` remain first-class persisted outputs.
-- Keep provider behavior config-driven via runtime metadata (backend/profile/failover from run config), not hardcoded provider-specific branches.
+- Preserve canonical stage status contract: `{logs_root}/{node_id}/status.json` is authoritative for routing.
+- Keep edge-routing semantics unchanged: condition evaluation, retry-target fallback behavior, deterministic tie-breaks.
+- Preserve parallel isolation and fan-in behavior: branch-local isolation and single winner integration.
+- Keep provider behavior config-driven; avoid provider-specific hardcoding in engine logic.
+- Keep condition matching semantics stable: route conditions still match raw outcome/context fields (do not silently change comparison semantics).
+- Status outcome parsing policy: accept legacy case variants on read, normalize to lowercase internally, and emit canonical lowercase on write.
 
 ## P0 (must fix first)
 
-- Make watchdog liveness fanout-aware: parent watchdog must treat child branch activity as progress.
-  - Done when: active fanout branches cannot trigger false `stall_watchdog_timeout`.
-- Add API `agent_loop` progress plumbing (`appendProgress`) so active API stages are visible to watchdog/observers.
-  - Done when: long-running API stages produce periodic progress events comparable to CLI visibility.
-  - Note: this alone is insufficient; parent watchdog must consume branch activity, not only branch-local logs.
-- Stop CLI heartbeat leaks: end heartbeat goroutine exactly when the stage process exits and key heartbeat events by attempt ID.
-  - Done when: zero heartbeats appear after `stage_attempt_end` for that `(node_id, attempt_id)`.
-- Add cancellation guards in `runSubgraphUntil` at loop top and post-stage execution.
-  - Done when: canceled contexts terminate branch loops immediately (no high-frequency fail cycling).
-- Port deterministic failure-cycle breaker into subgraph execution (parity with main `runLoop`).
-  - Done when: repeated deterministic branch loops abort within configured signature limits.
-- Propagate `failure_reason` and `failure_class` in subgraph context (parity with main path).
-  - Done when: check/conditional nodes retain upstream causal failures (no validator-only generic reasons).
-- Harden status ingestion contract (`status.json` vs `.ai/status.json`) with deterministic precedence, atomic copy, and explicit diagnostics.
-  - Done when: status discovery decisions are traceable, canonical stage status remains authoritative, status ownership is validated (`node` matches stage when present), and there are no false "missing status.json" failures when valid status was produced.
-- Guarantee top-level terminalization on all controllable exit paths.
-  - Done when: success/fail/watchdog cancel/context cancel/internal fatal errors all persist top-level `final.json` (best-effort; excludes uncatchable hard kill like `SIGKILL`).
+- Make watchdog liveness fanout-aware.
+  - Done when: active child-branch events reset parent watchdog idle timer; no false `stall_watchdog_timeout` while branches are active.
+- Add API `agent_loop` progress plumbing with explicit event parity.
+  - Done when: long-running API stages emit periodic progress via explicit stage progress events mapped from loop/tool milestones (start/delta/end), not just final completion.
+- Stop CLI heartbeat leaks with attempt scoping.
+  - Done when: zero heartbeats are observed after attempt end for the same `(node_id, attempt_id)`.
+- Add run-level cancellation guards in subgraph execution with explicit policy interaction.
+  - Policy: run-level cancel always preempts branch execution regardless of branch `error_policy`; `error_policy` still governs branch-local failure handling while run is live.
+  - Done when: canceled contexts terminate branch loops within cancellation convergence SLO.
+- Add deterministic subgraph cycle breaker (implementation parity), without changing DOT routing semantics.
+  - Done when: repeated deterministic failure signatures in subgraph path abort at configured threshold and emit explicit cycle-break event.
+- Preserve failure causality through routing nodes.
+  - Done when: upstream raw `failure_reason` survives check/conditional traversal and terminal outcomes.
+- Harden status ingestion with explicit precedence, ownership checks, and diagnostics.
+  - Precedence rule:
+  - Read canonical `{logs_root}/{node_id}/status.json` first.
+  - If canonical is absent, read `.ai/status.json` only as legacy fallback.
+  - Accept fallback only if ownership matches current stage/attempt (when ownership fields are present).
+  - Never overwrite an existing canonical status with fallback data.
+  - If fallback accepted, copy atomically to canonical path with provenance marker.
+  - Done when: status path selection is deterministic and fully traceable in logs.
+- Guarantee top-level terminalization on all controllable paths.
+  - Done when: terminal artifact exists for success/fail/watchdog cancel/context cancel/internal fatal exits.
+  - Note: uncatchable hard kill (`SIGKILL`) remains best-effort.
 
 ## P1 (high-value hardening)
 
-- Reclassify canceled-context/stall-timeout failures separately from deterministic provider/API failures.
-- Normalize failure signatures so semantically identical reasons collapse and cycle breakers trigger reliably.
-- Enforce strict model/failover policy: if config pins provider/model (especially production/no-failover), block implicit fallback.
-- Improve provider/tool adaptation (especially `apply_patch` contract handling for openai-family API profiles).
-- Add parent rollup telemetry for branch status summaries to improve live triage without drilling into branch dirs.
-
-## Required observability (for proving fixes)
-
-- Emit explicit branch-to-parent liveness events (or equivalent parent rollup counters).
-- Emit attempt IDs on all stage lifecycle/progress events (`stage_attempt_start`, `stage_attempt_end`, `stage_heartbeat`) and include monotonic elapsed in heartbeats.
-- Emit status-ingestion decision events: searched paths, selected path, parse result, ownership check result.
-- Emit subgraph cancellation exit event with terminal reason and node where loop stopped.
-- Emit deterministic-cycle breaker event in subgraph path with signature count and configured limit.
+- Separate cancellation/stall classifications from deterministic provider/API failure classes.
+  - Done when: terminal artifacts and telemetry distinguish cancel/timeouts from deterministic API failures.
+- Normalize failure signatures for cycle-break decisions without mutating route-visible raw reasons.
+  - Done when: engine stores both `failure_reason_raw` and normalized signature key; condition expressions remain compatible.
+- Enforce strict model/fallback policy from run config.
+  - Done when: pinned provider/model/no-failover configs block implicit fallback and emit explicit policy-violation diagnostics.
+- Improve provider/tool adaptation (especially `apply_patch` contract handling in openai-family API profiles).
+  - Done when: adapter behavior is deterministic and contract violations are surfaced as actionable errors.
+- Add parent rollup telemetry for branch health.
+  - Done when: operators can see branch-level liveness/failure summaries from parent stream without drilling into branch directories.
 
 ## P2 (validation and prevention)
 
-- Add regression test: fanout watchdog with active child progress must not false-timeout.
-- Add regression test: no stale heartbeats after attempt completion.
-- Add regression test: subgraph cancellation terminates immediately.
-- Add regression test: subgraph deterministic cycle breaker trips as configured.
-- Add regression test: status ingestion correctness for `status.json` and `.ai/status.json`.
-- Add regression test: failure propagation through check/conditional nodes preserves causal reason/class.
-- Add regression test: top-level `final.json` persistence on all terminal paths.
-- Add regression test: model pin/failover enforcement obeys run config exactly.
-- Add regression test: status ownership enforcement prevents cross-stage status reuse.
-- Add regression test: true-positive watchdog timeout still fires when no top-level or branch activity exists.
+- Fanout watchdog false-timeout regression.
+  - Level: integration.
+  - Matrix: `error_policy=fail_fast` and `error_policy=continue`.
+- Stale heartbeat leak regression.
+  - Level: unit + integration.
+- Subgraph cancellation convergence regression.
+  - Level: integration (timing-bound assertions).
+- Subgraph deterministic cycle-break regression.
+  - Level: integration.
+- Status ingestion precedence/ownership regression (`status.json` vs `.ai/status.json`).
+  - Level: unit + integration.
+- Failure propagation through check/conditional nodes regression.
+  - Level: integration.
+- Terminal artifact persistence regression for all controllable terminal paths.
+  - Level: integration/e2e.
+- Model pin/no-failover enforcement regression.
+  - Level: integration.
+- True-positive watchdog timeout regression (no top-level and no branch activity).
+  - Level: integration.
 
-## Suggested implementation order
+## Required observability
 
-- Land observability events first (minimal behavior change, maximal diagnostic value).
-- Ship subgraph cancellation + subgraph cycle breaker + subgraph failure propagation together.
-- Ship watchdog liveness + API progress plumbing + heartbeat attempt-scoping together.
-- Ship terminalization guarantee and status-ingestion hardening.
-- Land classification/signature/tooling hardening.
-- Gate completion on the full regression suite above.
+- Branch-to-parent liveness events/counters with run generation and branch identifiers.
+- Attempt identifiers on all lifecycle events: `stage_attempt_start`, `stage_attempt_end`, `stage_heartbeat`, `stage_progress`.
+- Status-ingestion decision events: searched paths, selected source, parse outcome, ownership validation result, canonical copy outcome.
+- Subgraph cancellation-exit event including elapsed convergence time and stop node.
+- Deterministic cycle-break event including signature, count, and threshold.
+- Terminalization event including final status, reason/class, and artifact path.
+
+## Spec delta proposals required (document separately)
+
+These items are currently implementation concepts and should be codified in spec docs to avoid drift:
+
+- Deterministic traversal-level cycle-break semantics for subgraph/main loop parity.
+- Top-level terminal artifact contract (`final.json` or equivalent) and required fields.
+- Optional failure classification taxonomy (if `failure_class` is retained).
+- Legacy `.ai/status.json` compatibility contract and deprecation path.
+- Explicit run-config failover policy semantics when provider/model is pinned.
+- Outcome casing canonicalization rule (resolve uppercase/lowercase inconsistency in attractor docs).
+
+## Suggested implementation order (risk-aware)
+
+- If rogue-trigger frequency is non-trivial, ship minimal behavioral hotfixes first:
+  - subgraph cancellation guards,
+  - heartbeat lifecycle scoping,
+  - fanout-aware watchdog liveness.
+- Then land observability for stronger diagnosis and proof.
+- Then land status-ingestion hardening + failure-causality preservation.
+- Then classification/signature/tool-adaptation hardening.
+- Then complete full regression matrix and release gates.
 
 ## Primary touchpoints
 
-- `internal/attractor/engine/parallel_handlers.go` (fanout orchestration, parent/branch liveness integration).
-- `internal/attractor/engine/subgraph.go` (cancellation guards, deterministic-cycle logic parity, context propagation parity).
-- `internal/attractor/engine/engine.go` (watchdog, terminalization/final artifact guarantees, failure signature normalization hooks).
-- `internal/attractor/engine/codergen_router.go` (CLI heartbeat lifecycle, API agent-loop progress emission).
-- `internal/attractor/engine/handlers.go` (status discovery/ingestion contract and status ownership validation).
-- `internal/attractor/runtime/status.go` (status validation constraints and compatibility behavior).
+- `internal/attractor/engine/parallel_handlers.go`
+- `internal/attractor/engine/subgraph.go`
+- `internal/attractor/engine/engine.go`
+- `internal/attractor/engine/codergen_router.go`
+- `internal/attractor/engine/handlers.go`
+- `internal/attractor/runtime/status.go`
+- `internal/attractor/engine/engine_stall_watchdog_test.go`
+- `internal/attractor/engine/parallel_guardrails_test.go`
+- `internal/attractor/engine/parallel_test.go`
+- `internal/attractor/engine/codergen_heartbeat_test.go`
+- `internal/attractor/runtime/status_test.go`
 
 ## Release gates
 
-- No new stale-heartbeat events in canary runs.
-- No fanout false-timeout in canary runs with active branches.
-- Deterministic branch loops terminate within configured limits.
-- Every terminated run has top-level `final.json` with correct terminal status and reason.
-- No regressions in canonical status/routing semantics (`status.json` contract, lowercase outcomes, fail/retry `failure_reason`).
+- No stale-heartbeat events after attempt completion in canaries.
+- No fanout false-timeouts in canaries with active branches.
+- Deterministic loops terminate within configured thresholds.
+- Cancellation convergence SLO is met.
+- Every controllably terminated run persists terminal artifact with correct status/reason.
+- No regressions in canonical status/routing semantics.
+- No implicit provider/model fallback when config forbids it.
