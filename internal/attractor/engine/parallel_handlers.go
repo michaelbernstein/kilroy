@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/strongdm/kilroy/internal/attractor/gitutil"
 	"github.com/strongdm/kilroy/internal/attractor/model"
@@ -160,12 +161,22 @@ func (h *ParallelHandler) runBranch(ctx context.Context, exec *Execution, parall
 	branchName := buildParallelBranch(prefix, exec.Engine.Options.RunID, parallelNode.ID, key)
 	branchRoot := filepath.Join(exec.LogsRoot, "parallel", parallelNode.ID, fmt.Sprintf("%02d-%s", idx+1, key))
 	worktreeDir := filepath.Join(branchRoot, "worktree")
+	emitBranchLiveness := func(stage string) {
+		exec.Engine.appendProgress(map[string]any{
+			"event":            "branch_liveness",
+			"branch_key":       key,
+			"branch_logs_root": branchRoot,
+			"branch_event":     stage,
+		})
+	}
 
 	// Prepare branch git worktree rooted at the parallel node checkpoint commit.
+	emitBranchLiveness("branch_setup_start")
 	_ = os.MkdirAll(branchRoot, 0o755)
 	if gitMu != nil {
 		gitMu.Lock()
 	}
+	emitBranchLiveness("branch_setup_locked")
 	_ = gitutil.RemoveWorktree(exec.Engine.Options.RepoPath, worktreeDir)
 	if err := gitutil.CreateBranchAt(exec.Engine.Options.RepoPath, branchName, baseSHA); err != nil {
 		if gitMu != nil {
@@ -201,6 +212,7 @@ func (h *ParallelHandler) runBranch(ctx context.Context, exec *Execution, parall
 	if gitMu != nil {
 		gitMu.Unlock()
 	}
+	emitBranchLiveness("branch_setup_ready")
 
 	branchEng := &Engine{
 		Graph:              exec.Graph,
@@ -222,8 +234,41 @@ func (h *ParallelHandler) runBranch(ctx context.Context, exec *Execution, parall
 			branchEng.CXDB = fork
 		}
 	}
+	branchEng.progressSink = func(ev map[string]any) {
+		eventName := strings.TrimSpace(fmt.Sprint(ev["event"]))
+		if eventName == "" {
+			return
+		}
+		exec.Engine.appendProgress(map[string]any{
+			"event":            "branch_liveness",
+			"branch_key":       key,
+			"branch_logs_root": branchRoot,
+			"branch_event":     eventName,
+		})
+	}
+	emitBranchLiveness("branch_subgraph_start")
+	keepaliveStop := make(chan struct{})
+	keepaliveDone := make(chan struct{})
+	go func() {
+		defer close(keepaliveDone)
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				emitBranchLiveness("branch_active")
+			case <-keepaliveStop:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	res, err := runSubgraphUntil(ctx, branchEng, edge.To, joinID)
+	close(keepaliveStop)
+	<-keepaliveDone
+	emitBranchLiveness("branch_subgraph_done")
 	if err != nil {
 		res.Error = err.Error()
 		if res.Outcome.Status == "" {

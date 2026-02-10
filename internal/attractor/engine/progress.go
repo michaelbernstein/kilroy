@@ -19,10 +19,8 @@ func (e *Engine) appendProgress(ev map[string]any) {
 	if e == nil {
 		return
 	}
+	sink := e.progressSink
 	logsRoot := strings.TrimSpace(e.LogsRoot)
-	if logsRoot == "" {
-		return
-	}
 	if ev == nil {
 		ev = map[string]any{}
 	}
@@ -32,6 +30,13 @@ func (e *Engine) appendProgress(ev map[string]any) {
 	}
 	if _, ok := ev["run_id"]; !ok && strings.TrimSpace(e.Options.RunID) != "" {
 		ev["run_id"] = e.Options.RunID
+	}
+	sinkEvent := copyMap(ev)
+	if logsRoot == "" {
+		if sink != nil {
+			sink(sinkEvent)
+		}
+		return
 	}
 
 	b, err := json.Marshal(ev)
@@ -53,6 +58,9 @@ func (e *Engine) appendProgress(ev map[string]any) {
 
 	// Overwrite live.json with the last event.
 	_ = os.WriteFile(filepath.Join(logsRoot, "live.json"), append(b, '\n'), 0o644)
+	if sink != nil {
+		sink(sinkEvent)
+	}
 }
 
 func (e *Engine) setLastProgressTime(ts time.Time) {
@@ -74,4 +82,15 @@ func (e *Engine) lastProgressTime() time.Time {
 	e.progressMu.Lock()
 	defer e.progressMu.Unlock()
 	return e.lastProgressAt
+}
+
+func copyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

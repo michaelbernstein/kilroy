@@ -155,6 +155,7 @@ type Engine struct {
 	progressMu sync.Mutex
 	// Guarded by progressMu.
 	lastProgressAt time.Time
+	progressSink   func(map[string]any)
 
 	// Fidelity/session resolution state.
 	incomingEdge          *model.Edge // edge used to reach the current node (nil for start)

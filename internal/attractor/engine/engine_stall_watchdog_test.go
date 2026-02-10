@@ -103,3 +103,10 @@ func TestRun_StallWatchdogStopsRunLoopBeforeFailEdgeTraversal(t *testing.T) {
 		t.Fatalf("run loop continued to fail edge node after cancellation: %s", progressPath)
 	}
 }
+
+func TestRun_StallWatchdog_ParallelBranchProgressKeepsParentAlive(t *testing.T) {
+	err := runParallelWatchdogFixture(t, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("expected no stall watchdog timeout, got %v", err)
+	}
+}

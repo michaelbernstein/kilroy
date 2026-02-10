@@ -190,11 +190,18 @@ digraph G {
 
 func runParallelWatchdogFixture(t *testing.T, stallTimeout time.Duration) error {
 	t.Helper()
+	_, err := runParallelWatchdogFixtureWithLogs(t, stallTimeout)
+	return err
+}
+
+func runParallelWatchdogFixtureWithLogs(t *testing.T, stallTimeout time.Duration) (string, error) {
+	t.Helper()
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("runParallelWatchdogFixture requires sleep binary")
 	}
 
 	repo := initTestRepo(t)
+	logsRoot := t.TempDir()
 	dot := []byte(`
 digraph G {
   graph [goal="parallel watchdog fixture"]
@@ -216,11 +223,11 @@ digraph G {
 	_, err := Run(context.Background(), dot, RunOptions{
 		RepoPath:           repo,
 		RunID:              "parallel-watchdog-fixture",
-		LogsRoot:           t.TempDir(),
+		LogsRoot:           logsRoot,
 		StallTimeout:       stallTimeout,
 		StallCheckInterval: 25 * time.Millisecond,
 	})
-	return err
+	return logsRoot, err
 }
 
 func runCanceledSubgraphFixture(t *testing.T) canceledSubgraphFixtureResult {
