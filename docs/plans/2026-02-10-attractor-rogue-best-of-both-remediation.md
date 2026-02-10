@@ -10,6 +10,59 @@
 
 ---
 
+### Task 0: Create Shared Reliability Test Fixtures (Used by Tasks 2-10)
+
+**Files:**
+- Create: `internal/attractor/engine/reliability_helpers_test.go`
+- Modify: `internal/attractor/engine/engine_test.go`
+
+**Step 1: Add a compile-failing helper smoke test**
+
+```go
+func TestReliabilityHelpers_CompileSmoke(t *testing.T) {
+    _ = runStatusIngestionFixture
+    _ = runHeartbeatFixture
+    _ = runParallelWatchdogFixture
+    _ = runCanceledSubgraphFixture
+    _ = runDeterministicSubgraphCycleFixture
+    _ = runProgressFixture
+}
+```
+
+**Step 2: Run to confirm helpers are missing**
+
+Run: `go test ./internal/attractor/engine -run 'ReliabilityHelpers_CompileSmoke' -count=1`
+Expected: FAIL with `undefined` helper symbols.
+
+**Step 3: Implement reusable fixture helpers with existing test conventions**
+
+```go
+func runStatusIngestionFixture(t *testing.T, canonical, worktree, invalid bool) (runtime.Outcome, statusSource) {
+    t.Helper()
+    // use initTestRepo/newCXDBTestServer/writePinnedCatalog + RunWithConfig pattern
+    // used by existing status_json_worktree_test.go
+    return runtime.Outcome{}, statusSourceNone
+}
+
+func runProgressFixture(t *testing.T) []map[string]any {
+    t.Helper()
+    // run a small graph and decode progress.ndjson into []map[string]any
+    return nil
+}
+```
+
+**Step 4: Re-run compile smoke test**
+
+Run: `go test ./internal/attractor/engine -run 'ReliabilityHelpers_CompileSmoke' -count=1`
+Expected: PASS.
+
+**Step 5: Commit**
+
+```bash
+git add internal/attractor/engine/reliability_helpers_test.go internal/attractor/engine/engine_test.go
+git commit -m "test(engine): add shared reliability fixture helpers for remediation test suite"
+```
+
 ### Task 1: Add Shared Atomic JSON Write Helper and Migrate Core Call Sites
 
 **Files:**
@@ -372,7 +425,7 @@ Expected: FAIL with post-cancel node scheduling.
 
 ```go
 for {
-    if err := runContextError(ctx); err != nil {
+    if err := ctx.Err(); err != nil {
         return parallelBranchResult{
             HeadSHA:    headSHA,
             LastNodeID: lastNode,
@@ -385,7 +438,7 @@ for {
     if err != nil {
         return parallelBranchResult{}, err
     }
-    if err := runContextError(ctx); err != nil {
+    if err := ctx.Err(); err != nil {
         return parallelBranchResult{
             HeadSHA:    headSHA,
             LastNodeID: lastNode,
@@ -501,6 +554,11 @@ Expected: FAIL in at least one metadata path.
 
 ```go
 // ConditionalHandler
+prevFailureClass := ""
+if exec != nil && exec.Context != nil {
+    prevFailureClass = exec.Context.GetString("failure_class", "")
+}
+
 return runtime.Outcome{
     Status:         prevStatus,
     PreferredLabel: prevPreferred,
@@ -530,10 +588,12 @@ git commit -m "engine: preserve failure reason/class metadata across conditional
 **Files:**
 - Modify: `internal/attractor/engine/loop_restart_policy.go`
 - Modify: `internal/attractor/engine/failure_policy.go`
+- Modify: `internal/attractor/engine/engine.go`
 - Modify: `internal/attractor/engine/provider_error_classification.go`
 - Modify: `internal/attractor/engine/provider_error_classification_test.go`
 - Modify: `internal/attractor/engine/failure_policy_test.go`
 - Modify: `internal/attractor/engine/retry_failure_class_test.go`
+- Modify: `internal/attractor/engine/deterministic_failure_cycle_test.go`
 
 **Step 1: Add failing tests for canceled-class semantics**
 
@@ -550,11 +610,18 @@ func TestNormalizedFailureClass_CanceledPreserved(t *testing.T) {
         t.Fatalf("normalized class=%q want %q", got, failureClassCanceled)
     }
 }
+
+func TestDeterministicFailureCycleBreaker_IgnoresCanceledClass(t *testing.T) {
+    err := runCanceledCycleFixture(t)
+    if err != nil && strings.Contains(err.Error(), "deterministic failure cycle") {
+        t.Fatalf("canceled failures should not trip deterministic cycle breaker: %v", err)
+    }
+}
 ```
 
 **Step 2: Run classification/retry tests and confirm failure**
 
-Run: `go test ./internal/attractor/engine -run 'ClassifyAPIError|NormalizedFailureClass|retry_failure_class' -count=1`
+Run: `go test ./internal/attractor/engine -run 'ClassifyAPIError|NormalizedFailureClass|DeterministicFailureCycleBreaker|retry_failure_class' -count=1`
 Expected: FAIL because canceled class is not yet modeled.
 
 **Step 3: Add `failureClassCanceled` and thread it through existing classifiers**
@@ -582,17 +649,22 @@ func normalizedFailureClass(raw string) string {
     // existing cases follow...
     }
 }
+
+// engine.go main loop guard (deterministic cycle breaker)
+if isFailureLoopRestartOutcome(out) && normalizedFailureClassOrDefault(failureClass) == failureClassDeterministic {
+    // existing deterministic cycle breaker logic
+}
 ```
 
 **Step 4: Re-run classifier and retry-policy tests**
 
-Run: `go test ./internal/attractor/engine -run 'ClassifyAPIError|NormalizedFailureClass|FailurePolicy|retry_failure_class' -count=1`
+Run: `go test ./internal/attractor/engine -run 'ClassifyAPIError|NormalizedFailureClass|DeterministicFailureCycleBreaker|FailurePolicy|retry_failure_class' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/loop_restart_policy.go internal/attractor/engine/failure_policy.go internal/attractor/engine/provider_error_classification.go internal/attractor/engine/provider_error_classification_test.go internal/attractor/engine/failure_policy_test.go internal/attractor/engine/retry_failure_class_test.go
+git add internal/attractor/engine/loop_restart_policy.go internal/attractor/engine/failure_policy.go internal/attractor/engine/engine.go internal/attractor/engine/provider_error_classification.go internal/attractor/engine/provider_error_classification_test.go internal/attractor/engine/failure_policy_test.go internal/attractor/engine/retry_failure_class_test.go internal/attractor/engine/deterministic_failure_cycle_test.go
 git commit -m "engine: introduce canceled failure class and prevent canceled outcomes from retrying"
 ```
 
@@ -616,15 +688,8 @@ func TestWithFailoverText_ExplicitEmptyFailoverDoesNotFallback(t *testing.T) {
     }
 }
 
-func TestResolveProviderRuntimes_ExplicitEmptyFailoverPreserved(t *testing.T) {
-    rt := loadProviderRuntimeFixture(t, "zai", []string{})
-    if !rt.FailoverExplicit {
-        t.Fatal("expected failover to be marked explicit")
-    }
-    if len(rt.Failover) != 0 {
-        t.Fatalf("expected zero failover targets, got %v", rt.Failover)
-    }
-}
+// Extend existing TestResolveProviderRuntimes_ExplicitEmptyFailoverDisablesBuiltinFallback
+// to assert explicit-empty semantics are preserved through failoverOrderFromRuntime().
 ```
 
 **Step 2: Run failover tests and confirm failure behavior**
@@ -807,8 +872,8 @@ Expected: graph file exists, build succeeds, and validator prints success.
 **Step 4: Run one rogue-fast validation execution and capture artifacts**
 
 Run:
-- if `run-fast.yaml` is real-provider and credentials are available: execute only the exact user-approved production command
-- if credentials are unavailable: execute a test-shim dry run using a copied shim config (same graph/runtime policy, `llm.cli_profile=test_shim`, explicit shim executables, `--allow-test-shim`)
+- default path: execute a test-shim dry run using a copied shim config (same graph/runtime policy, `llm.cli_profile=test_shim`, explicit shim executables, `--allow-test-shim`)
+- production path (optional): only if explicitly requested, execute the exact user-approved real-provider command
 
 Expected: run starts, logs directory created, and `live.json`/`progress.ndjson` appear.
 
@@ -825,7 +890,7 @@ git commit -m "postmortem: record regression evidence and rogue-fast validation 
 - Do not skip failing-test confirmation before implementation.
 - Re-run `go test ./internal/attractor/... -count=1` after any task that touches engine traversal/routing.
 - Re-run `go test ./internal/llm/... -count=1` after any task that touches provider error handling.
-- `internal/attractor/engine/progress_test.go` is touched in Task 3 and Task 10; merge/rebase those edits before either commit to avoid test drift.
+- `internal/attractor/engine/progress_test.go` is touched in Task 3 and Task 10; Task 10 must build directly on the Task 3 test changes (do not rewrite or duplicate coverage).
 
 ## Suggested Execution Branch
 
