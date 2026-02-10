@@ -2,62 +2,70 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Eliminate the failure modes found in rogue-fast and rogue-slow postmortems by hardening status ingestion, liveness/watchdog logic, cancellation and cycle handling, failure propagation/classification, and terminal artifact guarantees.
+**Goal:** Remove the reliability failures found in rogue-fast and rogue-slow by hardening artifact persistence, status ingestion, watchdog/liveness behavior, subgraph cancellation/cycle handling, failure causality/classification, and failover policy enforcement.
 
-**Architecture:** Implement in strict dependency order: artifact and status contract first, then liveness/cancellation/cycle controls, then failure taxonomy and failover policy, then observability and spec deltas. Every behavior change is test-first and committed in small deltas so regressions are isolated quickly.
+**Architecture:** Land fixes in dependency order: persistence + ingestion contract first, then liveness and traversal controls, then failure semantics, then observability/spec updates, then full regression and validation runs. Every task is test-first with small delta commits.
 
-**Tech Stack:** Go (`internal/attractor/engine`, `internal/attractor/runtime`, `internal/llm`), markdown specs (`docs/strongdm/attractor`), Go test tooling (`go test`).
+**Tech Stack:** Go (`internal/attractor/engine`, `internal/attractor/runtime`, `internal/llm`), attractor specs (`docs/strongdm/attractor/*.md`), run configs (`demo/rogue/*.yaml`), and Go test tooling.
 
 ---
 
-### Task 1: Atomic Artifact Write Primitive (runtime)
+### Task 1: Add Shared Atomic JSON Write Helper and Migrate Core Call Sites
 
 **Files:**
 - Create: `internal/attractor/runtime/atomic_write.go`
 - Modify: `internal/attractor/runtime/final.go`
 - Modify: `internal/attractor/runtime/checkpoint.go`
+- Modify: `internal/attractor/engine/engine.go`
 - Test: `internal/attractor/runtime/final_test.go`
 - Test: `internal/attractor/runtime/checkpoint_test.go`
 
-**Step 1: Write the failing test for atomic writer behavior**
+**Step 1: Write failing tests for atomic JSON persistence path**
 
 ```go
-func TestWriteJSONAtomic_ReplacesTargetWithoutPartialFile(t *testing.T) {
+func TestFinalOutcomeSave_UsesAtomicWrite(t *testing.T) {
     dir := t.TempDir()
-    target := filepath.Join(dir, "final.json")
+    path := filepath.Join(dir, "final.json")
 
-    require.NoError(t, os.WriteFile(target, []byte("{\"status\":\"old\"}"), 0o644))
-    err := writeJSONAtomic(target, map[string]any{"status": "new"})
-    require.NoError(t, err)
+    fo := &FinalOutcome{Status: FinalFail, FailureReason: "x"}
+    require.NoError(t, fo.Save(path))
 
-    b, err := os.ReadFile(target)
+    b, err := os.ReadFile(path)
     require.NoError(t, err)
-    require.Contains(t, string(b), "new")
+    require.Contains(t, string(b), "\"status\": \"fail\"")
 }
 ```
 
-**Step 2: Run test to verify it fails**
+**Step 2: Run test to verify it fails or proves current non-atomic path**
 
-Run: `go test ./internal/attractor/runtime -run 'WriteJSONAtomic_ReplacesTargetWithoutPartialFile' -count=1`
-Expected: FAIL with `undefined: writeJSONAtomic`.
+Run: `go test ./internal/attractor/runtime -run 'FinalOutcomeSave_UsesAtomicWrite|Checkpoint' -count=1`
+Expected: FAIL or missing atomic-writer assertions.
 
-**Step 3: Write minimal implementation**
+**Step 3: Implement helper and migrate `Save`/`writeJSON` callers**
 
 ```go
-func writeJSONAtomic(path string, v any) error {
+func WriteJSONAtomicFile(path string, v any) (err error) {
     if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
         return err
     }
+
     tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*.json")
     if err != nil {
         return err
     }
     tmpName := tmp.Name()
-    defer os.Remove(tmpName)
+    defer func() {
+        if tmpName != "" {
+            _ = os.Remove(tmpName)
+        }
+    }()
 
-    enc := json.NewEncoder(tmp)
-    enc.SetIndent("", "  ")
-    if err := enc.Encode(v); err != nil {
+    b, err := json.MarshalIndent(v, "", "  ")
+    if err != nil {
+        _ = tmp.Close()
+        return err
+    }
+    if _, err := tmp.Write(b); err != nil {
         _ = tmp.Close()
         return err
     }
@@ -68,582 +76,577 @@ func writeJSONAtomic(path string, v any) error {
     if err := tmp.Close(); err != nil {
         return err
     }
-    return os.Rename(tmpName, path)
+
+    if err := os.Rename(tmpName, path); err != nil {
+        return err
+    }
+    tmpName = ""
+    return nil
 }
 ```
 
-**Step 4: Run tests to verify they pass**
+**Step 4: Run runtime + engine tests for migrated call sites**
 
-Run: `go test ./internal/attractor/runtime -run 'WriteJSONAtomic|Final|Checkpoint' -count=1`
+Run: `go test ./internal/attractor/runtime ./internal/attractor/engine -run 'Final|Checkpoint|writeJSON' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/runtime/atomic_write.go internal/attractor/runtime/final.go internal/attractor/runtime/checkpoint.go internal/attractor/runtime/final_test.go internal/attractor/runtime/checkpoint_test.go
-git commit -m "runtime: add atomic json writer and migrate final/checkpoint persistence"
+git add internal/attractor/runtime/atomic_write.go internal/attractor/runtime/final.go internal/attractor/runtime/checkpoint.go internal/attractor/engine/engine.go internal/attractor/runtime/final_test.go internal/attractor/runtime/checkpoint_test.go
+git commit -m "runtime/engine: use atomic json writes for final/checkpoint and shared writeJSON path"
 ```
 
-### Task 2: Status Ingestion Precedence + Ownership Gate
+### Task 2: Harden Status Ingestion Precedence and Legacy Fallback Copying
 
 **Files:**
-- Modify: `internal/attractor/runtime/status.go`
 - Modify: `internal/attractor/engine/handlers.go`
-- Test: `internal/attractor/runtime/status_test.go`
-- Test: `internal/attractor/engine/status_json_test.go`
-- Test: `internal/attractor/engine/status_json_worktree_test.go`
-- Test: `internal/attractor/engine/status_json_legacy_details_test.go`
+- Modify: `internal/attractor/engine/status_json_test.go`
+- Modify: `internal/attractor/engine/status_json_worktree_test.go`
+- Modify: `internal/attractor/engine/status_json_legacy_details_test.go`
 
-**Step 1: Write failing decision-table tests**
+**Step 1: Add failing tests for precedence and fallback behavior**
 
 ```go
-func TestResolveStatusSource_DecisionTable(t *testing.T) {
-    cases := []struct {
-        name        string
-        haveCanonical bool
-        haveWorktree bool
-        haveAI       bool
-        expectSource string
-        expectErr    string
-    }{
-        {name: "canonical wins", haveCanonical: true, haveWorktree: true, haveAI: true, expectSource: "canonical"},
-        {name: "canonical ownership mismatch fails", haveCanonical: true, expectErr: "ownership mismatch"},
-        {name: "fallback worktree when canonical missing", haveWorktree: true, expectSource: "worktree"},
+func TestCodergenStatusIngestion_CanonicalStageStatusWins(t *testing.T) {}
+func TestCodergenStatusIngestion_FallbackOnlyWhenCanonicalMissing(t *testing.T) {}
+func TestCodergenStatusIngestion_InvalidFallbackIsRejected(t *testing.T) {}
+```
+
+**Step 2: Run ingestion-focused tests and confirm failure gaps**
+
+Run: `go test ./internal/attractor/engine -run 'StatusIngestion|WorktreeStatusJSON|status_json' -count=1`
+Expected: FAIL on at least one new precedence case.
+
+**Step 3: Implement explicit ingestion helper in `CodergenHandler.Execute` path**
+
+```go
+func copyFirstValidFallbackStatus(stageStatusPath string, fallbackPaths []string) (string, error) {
+    if _, err := os.Stat(stageStatusPath); err == nil {
+        return "canonical", nil
     }
-    // execute table against resolveStatusSource(...)
+    for _, p := range fallbackPaths {
+        b, err := os.ReadFile(p)
+        if err != nil {
+            continue
+        }
+        out, err := runtime.DecodeOutcomeJSON(b)
+        if err != nil {
+            continue
+        }
+        if err := writeJSON(stageStatusPath, out); err != nil {
+            return "", err
+        }
+        _ = os.Remove(p)
+        return p, nil
+    }
+    return "", nil
 }
 ```
 
-**Step 2: Run tests to verify they fail**
+**Step 4: Re-run ingestion tests**
 
-Run: `go test ./internal/attractor/runtime ./internal/attractor/engine -run 'ResolveStatusSource|status_json' -count=1`
-Expected: FAIL due to missing precedence/ownership cases.
-
-**Step 3: Implement minimal source resolver + canonical copy contract**
-
-```go
-type statusSource string
-
-const (
-    sourceCanonical statusSource = "canonical"
-    sourceWorktree  statusSource = "worktree"
-    sourceAI        statusSource = "ai"
-)
-
-func resolveStatusSource(paths statusPaths, owner statusOwner) (statusSource, error) {
-    // canonical first; deterministic error on canonical ownership mismatch;
-    // fallback only when canonical absent.
-}
-```
-
-**Step 4: Re-run targeted tests**
-
-Run: `go test ./internal/attractor/runtime ./internal/attractor/engine -run 'ResolveStatusSource|status_json|LegacyDetails' -count=1`
+Run: `go test ./internal/attractor/engine -run 'StatusIngestion|WorktreeStatusJSON|status_json|LegacyDetails' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/runtime/status.go internal/attractor/runtime/status_test.go internal/attractor/engine/handlers.go internal/attractor/engine/status_json_test.go internal/attractor/engine/status_json_worktree_test.go internal/attractor/engine/status_json_legacy_details_test.go
-git commit -m "engine/runtime: enforce canonical status precedence and ownership-gated legacy fallback"
+git add internal/attractor/engine/handlers.go internal/attractor/engine/status_json_test.go internal/attractor/engine/status_json_worktree_test.go internal/attractor/engine/status_json_legacy_details_test.go
+git commit -m "engine: make status ingestion precedence deterministic and reject invalid fallback status files"
 ```
 
-### Task 3: Attempt-Scoped Heartbeat Lifecycle
+### Task 3: Stop Heartbeat Emission Immediately After Stage Process Exit
 
 **Files:**
 - Modify: `internal/attractor/engine/codergen_router.go`
-- Modify: `internal/attractor/engine/progress.go`
-- Test: `internal/attractor/engine/codergen_heartbeat_test.go`
-- Test: `internal/attractor/engine/progress_test.go`
+- Modify: `internal/attractor/engine/codergen_heartbeat_test.go`
+- Modify: `internal/attractor/engine/progress_test.go`
 
-**Step 1: Write failing test for stale heartbeat leak**
+**Step 1: Add failing test for stale `stage_heartbeat` after process completion**
 
 ```go
-func TestHeartbeatStopsAfterAttemptEnd(t *testing.T) {
-    // start attempt -> emit heartbeats -> mark attempt end -> assert no further
-    // stage_heartbeat events for same (node_id, attempt_id, run_generation)
+func TestRunWithConfig_HeartbeatStopsAfterProcessExit(t *testing.T) {
+    // run short codergen CLI, then assert no heartbeat events after matching stage_attempt_end
 }
 ```
 
-**Step 2: Run failing test**
+**Step 2: Run heartbeat tests and confirm failure**
 
-Run: `go test ./internal/attractor/engine -run 'HeartbeatStopsAfterAttemptEnd|codergen_heartbeat' -count=1`
-Expected: FAIL with post-end heartbeat observed.
+Run: `go test ./internal/attractor/engine -run 'Heartbeat' -count=1`
+Expected: FAIL with post-completion heartbeat leak.
 
-**Step 3: Implement attempt lifecycle cancelation for heartbeat loop**
+**Step 3: Add explicit heartbeat stop channel in `runOnce`**
 
 ```go
-type attemptScope struct {
-    nodeID        string
-    attemptID     string
-    runGeneration int
-    done          chan struct{}
-}
+heartbeatStop := make(chan struct{})
+heartbeatDone := make(chan struct{})
+go func() {
+    defer close(heartbeatDone)
+    ticker := time.NewTicker(interval)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ticker.C:
+            emitHeartbeat(...)
+        case <-heartbeatStop:
+            return
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
 
-func (a *attemptScope) stop() { close(a.done) }
+runErr, idleTimedOut, err = waitWithIdleWatchdog(...)
+close(heartbeatStop)
+<-heartbeatDone
 ```
 
-**Step 4: Run targeted heartbeat/progress tests**
+**Step 4: Re-run heartbeat and progress tests**
 
-Run: `go test ./internal/attractor/engine -run 'Heartbeat|Progress|codergen_heartbeat' -count=1`
+Run: `go test ./internal/attractor/engine -run 'Heartbeat|Progress' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/codergen_router.go internal/attractor/engine/progress.go internal/attractor/engine/codergen_heartbeat_test.go internal/attractor/engine/progress_test.go
-git commit -m "engine: scope heartbeats to active attempt lifecycle and stop on attempt end"
+git add internal/attractor/engine/codergen_router.go internal/attractor/engine/codergen_heartbeat_test.go internal/attractor/engine/progress_test.go
+git commit -m "engine: stop codergen heartbeat goroutine as soon as stage process exits"
 ```
 
-### Task 4: Fanout-Aware Watchdog Liveness Aggregation
+### Task 4: Make Watchdog Liveness Fanout-Aware (Parent Sees Branch Progress)
 
 **Files:**
 - Modify: `internal/attractor/engine/engine.go`
+- Modify: `internal/attractor/engine/progress.go`
 - Modify: `internal/attractor/engine/parallel_handlers.go`
-- Test: `internal/attractor/engine/engine_stall_watchdog_test.go`
-- Test: `internal/attractor/engine/parallel_guardrails_test.go`
-- Test: `internal/attractor/engine/parallel_test.go`
+- Modify: `internal/attractor/engine/engine_stall_watchdog_test.go`
+- Modify: `internal/attractor/engine/parallel_guardrails_test.go`
+- Modify: `internal/attractor/engine/parallel_test.go`
 
-**Step 1: Write failing tests for branch progress resetting parent watchdog**
-
-```go
-func TestStallWatchdog_AnyActiveBranchLivenessResetsTimer(t *testing.T) {}
-func TestStallWatchdog_FirstSuccessIgnoresCanceledBranchAfterAck(t *testing.T) {}
-```
-
-**Step 2: Run failing watchdog tests**
-
-Run: `go test ./internal/attractor/engine -run 'StallWatchdog|parallel_guardrails|FirstSuccess' -count=1`
-Expected: FAIL with false timeout while branch events continue.
-
-**Step 3: Implement branch-aware liveness aggregator**
+**Step 1: Add failing test where branch activity should prevent parent stall timeout**
 
 ```go
-type watchdogLiveness struct {
-    activeBranches map[string]bool
-    lastTick       time.Time
+func TestRun_StallWatchdog_ParallelBranchProgressKeepsParentAlive(t *testing.T) {}
+```
+
+**Step 2: Run watchdog/parallel tests to confirm failure**
+
+Run: `go test ./internal/attractor/engine -run 'StallWatchdog|Parallel' -count=1`
+Expected: FAIL with false watchdog timeout in fanout case.
+
+**Step 3: Add parent progress forwarding from branch engines**
+
+```go
+// Engine field
+progressSink func(map[string]any)
+
+func (e *Engine) appendProgress(ev map[string]any) {
+    // existing write to progress.ndjson/live.json
+    if sink := e.progressSink; sink != nil {
+        sink(copyMap(ev))
+    }
 }
 
-func (w *watchdogLiveness) Accept(event progressEvent) bool {
-    // count attempt start/end/heartbeat + branch_complete;
-    // apply first_success cancellation acknowledgement rule.
+func copyMap(in map[string]any) map[string]any {
+    out := make(map[string]any, len(in))
+    for k, v := range in {
+        out[k] = v
+    }
+    return out
+}
+
+branchEng.progressSink = func(ev map[string]any) {
+    tagged := copyMap(ev)
+    tagged["branch_key"] = key
+    tagged["branch_logs_root"] = branchRoot
+    exec.Engine.appendProgress(tagged)
 }
 ```
 
-**Step 4: Run targeted parallel/watchdog tests**
+**Step 4: Re-run watchdog and parallel suites**
 
-Run: `go test ./internal/attractor/engine -run 'StallWatchdog|parallel_guardrails|parallel_test' -count=1`
+Run: `go test ./internal/attractor/engine -run 'StallWatchdog|Parallel' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/engine.go internal/attractor/engine/parallel_handlers.go internal/attractor/engine/engine_stall_watchdog_test.go internal/attractor/engine/parallel_guardrails_test.go internal/attractor/engine/parallel_test.go
-git commit -m "engine: make stall watchdog liveness fanout-aware across active branches"
+git add internal/attractor/engine/engine.go internal/attractor/engine/progress.go internal/attractor/engine/parallel_handlers.go internal/attractor/engine/engine_stall_watchdog_test.go internal/attractor/engine/parallel_guardrails_test.go internal/attractor/engine/parallel_test.go
+git commit -m "engine: forward branch liveness to parent watchdog in parallel fanout runs"
 ```
 
-### Task 5: Cancellation Precedence in Subgraph/Parallel Traversal
+### Task 5: Add Cancellation Guards in `runSubgraphUntil`
 
 **Files:**
 - Modify: `internal/attractor/engine/subgraph.go`
-- Modify: `internal/attractor/engine/parallel_handlers.go`
-- Modify: `internal/attractor/engine/next_hop.go`
-- Test: `internal/attractor/engine/next_hop_test.go`
-- Test: `internal/attractor/engine/parallel_guardrails_test.go`
+- Modify: `internal/attractor/engine/parallel_guardrails_test.go`
+- Modify: `internal/attractor/engine/next_hop_test.go`
 
-**Step 1: Write failing tests for "no new attempts after cancel"**
+**Step 1: Add failing tests proving no new attempts start after cancellation**
 
 ```go
-func TestRunSubgraphUntil_CancelStopsEdgeSelection(t *testing.T) {}
-func TestCancelPrecedence_IgnoreErrorPolicyStillStopsRun(t *testing.T) {}
+func TestRunSubgraphUntil_ContextCanceled_StopsBeforeNextNode(t *testing.T) {}
+func TestParallelCancelPrecedence_IgnorePolicyDoesNotScheduleNewWork(t *testing.T) {}
 ```
 
-**Step 2: Run failing cancellation tests**
+**Step 2: Run cancel guard tests and confirm failure**
 
-Run: `go test ./internal/attractor/engine -run 'CancelStopsEdgeSelection|CancelPrecedence|next_hop' -count=1`
-Expected: FAIL with attempt scheduling after cancellation.
+Run: `go test ./internal/attractor/engine -run 'SubgraphUntil|CancelPrecedence|Cancel' -count=1`
+Expected: FAIL with post-cancel node scheduling.
 
-**Step 3: Implement cancellation guards at loop boundaries and post-node execution**
+**Step 3: Insert guard checks at loop boundaries and before edge traversal**
 
 ```go
-if ctx.Err() != nil {
-    return runtime.StageStatusFail, runtime.FailureReasonCanceled
+for {
+    if err := runContextError(ctx); err != nil {
+        return parallelBranchResult{}, err
+    }
+
+    out, err := eng.executeWithRetry(ctx, node, nodeRetries)
+    if err != nil {
+        return parallelBranchResult{}, err
+    }
+    if err := runContextError(ctx); err != nil {
+        return parallelBranchResult{}, err
+    }
+
+    next, err := selectNextEdge(...)
+    // ...
 }
 ```
 
-**Step 4: Re-run cancellation and next-hop tests**
+**Step 4: Re-run cancellation tests**
 
-Run: `go test ./internal/attractor/engine -run 'Cancel|next_hop|parallel_guardrails' -count=1`
+Run: `go test ./internal/attractor/engine -run 'SubgraphUntil|Cancel|NextHop' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/subgraph.go internal/attractor/engine/parallel_handlers.go internal/attractor/engine/next_hop.go internal/attractor/engine/next_hop_test.go internal/attractor/engine/parallel_guardrails_test.go
-git commit -m "engine: enforce cancellation precedence in subgraph and parallel traversal"
+git add internal/attractor/engine/subgraph.go internal/attractor/engine/parallel_guardrails_test.go internal/attractor/engine/next_hop_test.go
+git commit -m "engine: stop subgraph traversal immediately when run context is canceled"
 ```
 
-### Task 6: Deterministic Cycle Breaker Parity in Subgraph Path
+### Task 6: Add Deterministic Failure Cycle Breaker Parity to Subgraph Path
 
 **Files:**
 - Modify: `internal/attractor/engine/subgraph.go`
-- Modify: `internal/attractor/engine/loop_restart_policy.go`
-- Test: `internal/attractor/engine/deterministic_failure_cycle_test.go`
-- Test: `internal/attractor/engine/deterministic_failure_cycle_resume_test.go`
-- Test: `internal/attractor/engine/loop_restart_guardrails_test.go`
+- Modify: `internal/attractor/engine/deterministic_failure_cycle_test.go`
+- Modify: `internal/attractor/engine/deterministic_failure_cycle_resume_test.go`
+- Modify: `internal/attractor/engine/loop_restart_guardrails_test.go`
 
-**Step 1: Write failing tests for repeated-signature breaker in subgraph traversal**
+**Step 1: Add failing subgraph-specific cycle-breaker test**
 
 ```go
-func TestSubgraphDeterministicFailureCycle_BreaksAtConfiguredLimit(t *testing.T) {}
+func TestRunSubgraphUntil_DeterministicFailureCycleBreaksAtLimit(t *testing.T) {}
 ```
 
-**Step 2: Run failing cycle tests**
+**Step 2: Run cycle tests and confirm missing subgraph parity**
 
-Run: `go test ./internal/attractor/engine -run 'SubgraphDeterministicFailureCycle|deterministic_failure_cycle' -count=1`
-Expected: FAIL with repeated retries past configured limit.
+Run: `go test ./internal/attractor/engine -run 'DeterministicFailureCycle|SubgraphUntil|loop_restart' -count=1`
+Expected: FAIL in subgraph cycle case.
 
-**Step 3: Implement shared signature counter path used by main + subgraph**
+**Step 3: Reuse existing loop signature primitives in subgraph loop**
 
 ```go
-sig := normalizeFailureSignature(rawReason)
-count := bumpFailureSignature(sig)
-if count >= loopRestartSignatureLimit {
-    return triggerLoopRestart(sig, count)
+failureClass := classifyFailureClass(out)
+if isFailureLoopRestartOutcome(out) && normalizedFailureClassOrDefault(failureClass) == failureClassDeterministic {
+    sig := restartFailureSignature(node.ID, out, failureClass)
+    eng.loopFailureSignatures[sig]++
+    if eng.loopFailureSignatures[sig] >= loopRestartSignatureLimit(eng.Graph) {
+        return parallelBranchResult{}, fmt.Errorf("deterministic failure cycle detected in subgraph: %s", sig)
+    }
 }
 ```
 
-**Step 4: Re-run cycle/loop-restart tests**
+**Step 4: Re-run cycle-related tests**
 
-Run: `go test ./internal/attractor/engine -run 'deterministic_failure_cycle|loop_restart' -count=1`
+Run: `go test ./internal/attractor/engine -run 'DeterministicFailureCycle|loop_restart' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/subgraph.go internal/attractor/engine/loop_restart_policy.go internal/attractor/engine/deterministic_failure_cycle_test.go internal/attractor/engine/deterministic_failure_cycle_resume_test.go internal/attractor/engine/loop_restart_guardrails_test.go
-git commit -m "engine: add deterministic failure-cycle breaker parity for subgraph traversal"
+git add internal/attractor/engine/subgraph.go internal/attractor/engine/deterministic_failure_cycle_test.go internal/attractor/engine/deterministic_failure_cycle_resume_test.go internal/attractor/engine/loop_restart_guardrails_test.go
+git commit -m "engine: apply deterministic failure cycle breaker in subgraph traversal"
 ```
 
-### Task 7: Failure Causality Preservation Through Routing and Terminalization
+### Task 7: Preserve Failure Causality Through Conditional Routing and Branch Context
 
 **Files:**
 - Modify: `internal/attractor/engine/handlers.go`
+- Modify: `internal/attractor/engine/subgraph.go`
 - Modify: `internal/attractor/engine/conditional_passthrough_test.go`
-- Modify: `internal/attractor/runtime/final.go`
-- Test: `internal/attractor/runtime/final_test.go`
+- Modify: `internal/attractor/engine/failure_routing_fanin_test.go`
 
-**Step 1: Write failing tests for raw reason propagation**
+**Step 1: Add failing tests for failure metadata pass-through**
 
 ```go
-func TestConditionalPassthrough_PreservesFailureReason(t *testing.T) {}
-func TestFinalArtifact_PreservesRawFailureReason(t *testing.T) {}
+func TestConditionalPassThrough_PreservesFailureReasonAndClass(t *testing.T) {}
+func TestSubgraphContext_PreservesFailureReasonAcrossNodes(t *testing.T) {}
 ```
 
-**Step 2: Run failing tests**
+**Step 2: Run pass-through tests and confirm gaps**
 
-Run: `go test ./internal/attractor/engine ./internal/attractor/runtime -run 'PreservesFailureReason|conditional_passthrough|FinalArtifact' -count=1`
-Expected: FAIL with genericized reason replacing causal reason.
+Run: `go test ./internal/attractor/engine -run 'ConditionalPassThrough|SubgraphContext|FanIn' -count=1`
+Expected: FAIL in at least one metadata path.
 
-**Step 3: Implement pass-through fields and separate normalized signature field**
+**Step 3: Propagate `failure_reason` and `failure_class` explicitly in context updates**
 
 ```go
-type failureMeta struct {
-    RawReason           string `json:"failure_reason"`
-    NormalizedSignature string `json:"failure_signature_normalized,omitempty"`
+// ConditionalHandler
+return runtime.Outcome{
+    Status:         prevStatus,
+    PreferredLabel: prevPreferred,
+    FailureReason:  prevFailure,
+    ContextUpdates: map[string]any{"failure_class": prevFailureClass},
 }
+
+// subgraph loop
+eng.Context.Set("failure_reason", out.FailureReason)
+eng.Context.Set("failure_class", classifyFailureClass(out))
 ```
 
-**Step 4: Re-run failure propagation tests**
+**Step 4: Re-run routing and pass-through tests**
 
-Run: `go test ./internal/attractor/engine ./internal/attractor/runtime -run 'FailureReason|conditional_passthrough|FinalArtifact' -count=1`
+Run: `go test ./internal/attractor/engine -run 'Conditional|FanIn|SubgraphContext' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/handlers.go internal/attractor/engine/conditional_passthrough_test.go internal/attractor/runtime/final.go internal/attractor/runtime/final_test.go
-git commit -m "engine/runtime: preserve causal failure reasons through conditionals and terminal artifact"
+git add internal/attractor/engine/handlers.go internal/attractor/engine/subgraph.go internal/attractor/engine/conditional_passthrough_test.go internal/attractor/engine/failure_routing_fanin_test.go
+git commit -m "engine: preserve failure reason/class metadata across conditional and subgraph routing"
 ```
 
-### Task 8: Terminal Artifact Guarantee Across All Controllable Exits
+### Task 8: Separate Canceled-Run Classification From Deterministic API Failures
 
 **Files:**
-- Modify: `internal/attractor/engine/engine.go`
-- Modify: `internal/attractor/runtime/final.go`
-- Test: `internal/attractor/engine/engine_test.go`
-- Test: `internal/attractor/engine/handler_panic_test.go`
-- Test: `internal/attractor/runtime/final_test.go`
-
-**Step 1: Write failing integration tests for missing `final.json` paths**
-
-```go
-func TestRunWritesFinalJSON_OnWatchdogTimeout(t *testing.T) {}
-func TestRunWritesFinalJSON_OnContextCancel(t *testing.T) {}
-func TestRunWritesFinalJSON_OnHandlerPanic(t *testing.T) {}
-```
-
-**Step 2: Run failing terminalization tests**
-
-Run: `go test ./internal/attractor/engine ./internal/attractor/runtime -run 'WritesFinalJSON|HandlerPanic|WatchdogTimeout|ContextCancel' -count=1`
-Expected: FAIL in one or more terminal paths.
-
-**Step 3: Implement single terminalization hook invoked by every controllable exit path**
-
-```go
-func (e *Engine) finalizeRun(ctx context.Context, status runtime.FinalStatus, reason string) {
-    _ = runtime.WriteFinal(e.logsRoot, runtime.Final{Status: status, FailureReason: reason, RunID: e.runID})
-}
-```
-
-**Step 4: Re-run terminalization tests**
-
-Run: `go test ./internal/attractor/engine ./internal/attractor/runtime -run 'WritesFinalJSON|final' -count=1`
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add internal/attractor/engine/engine.go internal/attractor/runtime/final.go internal/attractor/engine/engine_test.go internal/attractor/engine/handler_panic_test.go internal/attractor/runtime/final_test.go
-git commit -m "engine: guarantee final.json persistence for all controllable terminal paths"
-```
-
-### Task 9: Unified-LLM Error Taxonomy Mapping Completion
-
-**Files:**
+- Modify: `internal/attractor/engine/loop_restart_policy.go`
+- Modify: `internal/attractor/engine/failure_policy.go`
 - Modify: `internal/attractor/engine/provider_error_classification.go`
-- Test: `internal/attractor/engine/provider_error_classification_test.go`
-- Test: `internal/attractor/engine/retry_classification_integration_test.go`
-- Test: `internal/attractor/engine/retry_failure_class_test.go`
+- Modify: `internal/attractor/engine/provider_error_classification_test.go`
+- Modify: `internal/attractor/engine/failure_policy_test.go`
+- Modify: `internal/attractor/engine/retry_failure_class_test.go`
 
-**Step 1: Write failing table-driven mapping tests for missing types**
-
-```go
-func TestClassifyProviderError_CompleteUnifiedTaxonomy(t *testing.T) {
-    cases := []struct {
-        err  error
-        want string
-    }{
-        {err: llm.InvalidToolCallError{Message: "bad"}, want: "api_deterministic"},
-        {err: llm.NoObjectGeneratedError{Message: "missing"}, want: "api_deterministic"},
-        {err: context.Canceled, want: "canceled"},
-    }
-    // assert classifier output
-}
-```
-
-**Step 2: Run failing classification tests**
-
-Run: `go test ./internal/attractor/engine -run 'ClassifyProviderError|retry_classification|retry_failure_class' -count=1`
-Expected: FAIL for missing or misclassified entries.
-
-**Step 3: Implement full mapping and explicit canceled-context class**
+**Step 1: Add failing tests for canceled-class semantics**
 
 ```go
-func classifyProviderError(err error) failureClass {
-    switch {
-    case errors.Is(err, context.Canceled):
-        return failureClassCanceled
-    case llm.IsInvalidToolCallError(err), llm.IsNoObjectGeneratedError(err):
-        return failureClassAPIDeterministic
-    // full unified-llm mapping cases
-    }
-}
+func TestClassifyAPIError_AbortErrorMapsToCanceledClass(t *testing.T) {}
+func TestShouldRetryOutcome_CanceledNeverRetries(t *testing.T) {}
 ```
 
-**Step 4: Re-run classifier/retry tests**
+**Step 2: Run classification/retry tests and confirm failure**
 
-Run: `go test ./internal/attractor/engine -run 'ClassifyProviderError|retry_classification|retry_failure_class' -count=1`
+Run: `go test ./internal/attractor/engine -run 'ClassifyAPIError|ShouldRetryOutcome|retry_failure_class' -count=1`
+Expected: FAIL because canceled class is not yet modeled.
+
+**Step 3: Add `failureClassCanceled` and thread it through existing classifiers**
+
+```go
+const (
+    failureClassTransientInfra = "transient_infra"
+    failureClassDeterministic  = "deterministic"
+    failureClassCanceled       = "canceled"
+)
+
+// classifyAPIError: keep WrapContextError contract; classify llm.AbortError as canceled.
+```
+
+**Step 4: Re-run classifier and retry-policy tests**
+
+Run: `go test ./internal/attractor/engine -run 'ClassifyAPIError|FailurePolicy|retry_failure_class' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/provider_error_classification.go internal/attractor/engine/provider_error_classification_test.go internal/attractor/engine/retry_classification_integration_test.go internal/attractor/engine/retry_failure_class_test.go
-git commit -m "engine: complete unified llm error mapping and separate canceled-context classification"
+git add internal/attractor/engine/loop_restart_policy.go internal/attractor/engine/failure_policy.go internal/attractor/engine/provider_error_classification.go internal/attractor/engine/provider_error_classification_test.go internal/attractor/engine/failure_policy_test.go internal/attractor/engine/retry_failure_class_test.go
+git commit -m "engine: introduce canceled failure class and prevent canceled outcomes from retrying"
 ```
 
-### Task 10: Enforce Pinned No-Failover Policy + Tool-Contract Guardrails
+### Task 9: Enforce No-Failover Pinning via Existing Runtime Failover Semantics
 
 **Files:**
 - Modify: `internal/attractor/engine/provider_runtime.go`
+- Modify: `internal/attractor/engine/codergen_router.go`
+- Modify: `internal/attractor/engine/provider_runtime_test.go`
 - Modify: `internal/attractor/engine/codergen_failover_test.go`
-- Modify: `internal/attractor/engine/config.go`
-- Modify: `internal/attractor/engine/config_runtime_policy_test.go`
-- Modify: `internal/llm/tool_validation.go`
-- Modify: `internal/llm/tool_validation_test.go`
+- Modify: `demo/rogue/run-fast.yaml`
+- Modify: `demo/rogue/run.yaml`
 
-**Step 1: Write failing tests for explicit pin/no-failover enforcement**
+**Step 1: Add failing tests for explicit `failover: []` meaning "hard pin"**
 
 ```go
-func TestPinnedProviderModel_NoFailoverAllowed(t *testing.T) {}
-func TestPinnedProviderModel_FailoverAttemptFailsLoudly(t *testing.T) {}
+func TestWithFailoverText_ExplicitEmptyFailoverDoesNotFallback(t *testing.T) {}
+func TestResolveProviderRuntimes_ExplicitEmptyFailoverPreserved(t *testing.T) {}
 ```
 
-**Step 2: Run failing failover/policy tests**
+**Step 2: Run failover tests and confirm failure behavior**
 
-Run: `go test ./internal/attractor/engine ./internal/llm -run 'NoFailover|PinnedProviderModel|ToolValidation' -count=1`
-Expected: FAIL when runtime silently chooses fallback.
+Run: `go test ./internal/attractor/engine -run 'Failover|ProviderRuntime' -count=1`
+Expected: FAIL if any implicit fallback still occurs.
 
-**Step 3: Implement enforcement path and deterministic policy violation errors**
+**Step 3: Wire no-failover behavior in router runtime path**
 
 ```go
-if policy.PinProviderModel && nextProvider != pinnedProvider {
-    return fmt.Errorf("failover forbidden by run policy: pinned provider/model %s/%s", pinnedProvider, pinnedModel)
+order := failoverOrderFromRuntime(provider, runtimes)
+if len(order) == 0 {
+    return "", providerUse{}, fmt.Errorf("no failover allowed by runtime config for provider %s", provider)
 }
 ```
 
-**Step 4: Re-run policy/tool validation tests**
+**Step 4: Re-run failover tests + config tests**
 
-Run: `go test ./internal/attractor/engine ./internal/llm -run 'NoFailover|PinnedProviderModel|ToolValidation' -count=1`
+Run: `go test ./internal/attractor/engine -run 'Failover|ProviderRuntime|LoadRunConfig' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/provider_runtime.go internal/attractor/engine/codergen_failover_test.go internal/attractor/engine/config.go internal/attractor/engine/config_runtime_policy_test.go internal/llm/tool_validation.go internal/llm/tool_validation_test.go
-git commit -m "engine/llm: enforce pinned no-failover policy and harden tool contract validation"
+git add internal/attractor/engine/provider_runtime.go internal/attractor/engine/codergen_router.go internal/attractor/engine/provider_runtime_test.go internal/attractor/engine/codergen_failover_test.go demo/rogue/run-fast.yaml demo/rogue/run.yaml
+git commit -m "engine/config: enforce explicit no-failover behavior and pin rogue configs to declared failover chains"
 ```
 
-### Task 11: Observability for Ingestion, Liveness, Cancellation, and Cycle Breaks
+### Task 10: Add Missing Observability Events for Ingestion/Cycle/Cancel Decisions
 
 **Files:**
 - Modify: `internal/attractor/engine/progress.go`
-- Modify: `internal/attractor/engine/cxdb_events.go`
-- Test: `internal/attractor/engine/progress_test.go`
-- Test: `internal/attractor/engine/reference_compat_test.go`
+- Modify: `internal/attractor/engine/handlers.go`
+- Modify: `internal/attractor/engine/subgraph.go`
+- Modify: `internal/attractor/engine/engine.go`
+- Modify: `internal/attractor/engine/progress_test.go`
 
-**Step 1: Write failing event-coverage tests for new decision points**
+**Step 1: Add failing tests for required progress events**
 
 ```go
-func TestProgressEmitsStatusIngestionDecision(t *testing.T) {}
-func TestProgressEmitsCycleBreakSignatureAndLimit(t *testing.T) {}
-func TestProgressEmitsCancellationExitPoint(t *testing.T) {}
+func TestProgressIncludesStatusIngestionDecisionEvent(t *testing.T) {}
+func TestProgressIncludesSubgraphCycleBreakEvent(t *testing.T) {}
+func TestProgressIncludesCancellationExitEvent(t *testing.T) {}
 ```
 
-**Step 2: Run failing observability tests**
+**Step 2: Run progress tests and confirm missing events**
 
-Run: `go test ./internal/attractor/engine -run 'ProgressEmits|reference_compat' -count=1`
-Expected: FAIL because events are missing.
+Run: `go test ./internal/attractor/engine -run 'ProgressIncludes|progress' -count=1`
+Expected: FAIL because events are not emitted yet.
 
-**Step 3: Add structured event payloads with stable keys**
+**Step 3: Emit structured events with stable keys at decision points**
 
 ```go
-emit("status_ingestion_decision", map[string]any{
-    "chosen_source": source,
-    "ownership_result": ownership,
-    "copied_to_canonical": copied,
+e.appendProgress(map[string]any{
+    "event": "status_ingestion_decision",
+    "node_id": node.ID,
+    "source": source,
+    "copied": copied,
 })
 ```
 
-**Step 4: Re-run observability tests**
+**Step 4: Re-run progress tests**
 
-Run: `go test ./internal/attractor/engine -run 'ProgressEmits|reference_compat' -count=1`
+Run: `go test ./internal/attractor/engine -run 'ProgressIncludes|progress' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add internal/attractor/engine/progress.go internal/attractor/engine/cxdb_events.go internal/attractor/engine/progress_test.go internal/attractor/engine/reference_compat_test.go
-git commit -m "engine: add structured observability events for status ingestion, cancellation, liveness, and cycle breaks"
+git add internal/attractor/engine/progress.go internal/attractor/engine/handlers.go internal/attractor/engine/subgraph.go internal/attractor/engine/engine.go internal/attractor/engine/progress_test.go
+git commit -m "engine: emit structured progress events for status ingestion, cancellation exits, and cycle-break decisions"
 ```
 
-### Task 12: Spec Delta Documentation (Attractor + Unified LLM alignment)
+### Task 11: Document Spec Deltas and Contracts
 
 **Files:**
 - Modify: `docs/strongdm/attractor/attractor-spec.md`
 - Modify: `docs/strongdm/attractor/coding-agent-loop-spec.md`
 - Modify: `docs/strongdm/attractor/unified-llm-spec.md`
-- Modify: `postmortem-rogue-best-of-both-fixes.md`
 
-**Step 1: Write failing doc checklist in plan comments**
-
-```markdown
-- [ ] `loop_restart_signature_limit` contract documented
-- [ ] status ingestion fallback contract documented
-- [ ] enum-vs-condition casing clarified
-- [ ] cancellation precedence over parallel error_policy documented
-```
-
-**Step 2: Run doc consistency grep checks**
-
-Run: `rg -n 'loop_restart_signature_limit|status.json|cancellation|StageStatus|outcome=' docs/strongdm/attractor`
-Expected: Missing one or more required contracts.
-
-**Step 3: Implement minimal spec delta text blocks**
+**Step 1: Add a failing docs checklist in this plan**
 
 ```markdown
-### Cancellation Precedence
-Run-level cancellation terminates further node scheduling regardless of branch-level `error_policy`.
+- [ ] Canonical vs fallback status ingestion contract documented
+- [ ] Fanout-aware watchdog liveness contract documented
+- [ ] Subgraph cancellation and deterministic cycle-break parity documented
+- [ ] Canceled failure class contract documented
+- [ ] Explicit no-failover semantics for `failover: []` documented
 ```
 
-**Step 4: Re-run grep checks + markdown sanity**
+**Step 2: Run grep checks to show missing wording before edits**
 
-Run: `rg -n 'loop_restart_signature_limit|legacy fallback|cancellation precedence|StageStatus' docs/strongdm/attractor`
-Expected: All required phrases present in correct specs.
+Run: `rg -n 'legacy status fallback|fanout liveness|canceled failure class|loop_restart_signature_limit|failover:\s*\[\]' docs/strongdm/attractor`
+Expected: One or more required concepts missing.
+
+**Step 3: Add minimal, normative text blocks in the relevant spec sections**
+
+```markdown
+Run-level cancellation takes precedence over branch-local retry/error policy.
+No additional stage attempts may start after cancellation is observed.
+```
+
+**Step 4: Re-run grep checks**
+
+Run: `rg -n 'legacy status fallback|fanout liveness|canceled failure class|loop_restart_signature_limit|failover:\s*\[\]' docs/strongdm/attractor`
+Expected: All checklist concepts now present.
 
 **Step 5: Commit**
 
 ```bash
-git add docs/strongdm/attractor/attractor-spec.md docs/strongdm/attractor/coding-agent-loop-spec.md docs/strongdm/attractor/unified-llm-spec.md postmortem-rogue-best-of-both-fixes.md
-git commit -m "docs: codify runtime contracts and spec deltas for status, cancellation, cycle-break, and taxonomy"
+git add docs/strongdm/attractor/attractor-spec.md docs/strongdm/attractor/coding-agent-loop-spec.md docs/strongdm/attractor/unified-llm-spec.md
+git commit -m "docs: codify attractor runtime contracts for status ingestion, liveness, cancellation, cycle-breaks, and no-failover semantics"
 ```
 
-### Task 13: Full Regression Gate + Rogue-Fast Validation Run
+### Task 12: Full Regression Gate + Rogue-Fast Validation Execution
 
 **Files:**
-- Modify: `docs/plans/2026-02-10-attractor-rogue-best-of-both-remediation.md`
-- Modify: `postmortem-rogue-best-of-both-fixes.md` (release gate evidence section)
+- Modify: `postmortem-rogue-best-of-both-fixes.md`
 
-**Step 1: Add failing regression checklist entry for untouched suites**
+**Step 1: Add release evidence checklist to postmortem**
 
 ```markdown
-- [ ] `go test ./internal/attractor/...`
-- [ ] `go test ./internal/llm/...`
-- [ ] `go run ./cmd/kilroy attractor validate --graph demo/rogue/rogue_fast.dot`
+- [ ] `go test ./internal/attractor/... -count=1`
+- [ ] `go test ./internal/llm/... -count=1`
+- [ ] `go build -o ./kilroy ./cmd/kilroy`
+- [ ] `./kilroy attractor validate --graph demo/rogue/rogue_fast.dot`
+- [ ] One rogue-fast validation run recorded (run_id + status artifact)
 ```
 
-**Step 2: Run full regression suite**
+**Step 2: Run full regression suites**
 
 Run: `go test ./internal/attractor/... ./internal/llm/... -count=1`
-Expected: PASS (if FAIL, return to owning task).
+Expected: PASS.
 
-**Step 3: Run graph validation + one rogue-fast validation run**
+**Step 3: Build and validate graph with local binary**
 
 Run:
-- `go run ./cmd/kilroy attractor validate --graph demo/rogue/rogue_fast.dot`
-- `./kilroy attractor run --detach --graph demo/rogue/rogue_fast.dot --config demo/rogue/run-fast.yaml --run-id rogue-fast-validation-$(date +%Y%m%d-%H%M%S) --logs-root ~/.local/state/kilroy/attractor`
+- `go build -o ./kilroy ./cmd/kilroy`
+- `./kilroy attractor validate --graph demo/rogue/rogue_fast.dot`
 
-Expected: graph validate passes; run starts cleanly with no immediate watchdog/failover misconfiguration failure.
+Expected: Build succeeds; graph validator prints success.
 
-**Step 4: Capture evidence in postmortem release gate section**
+**Step 4: Run one rogue-fast validation execution and capture artifacts**
 
-```markdown
-- Regression command outputs
-- Validation run_id
-- `final.json` status or active-progress snapshot timestamp
-```
+Run:
+- if `run-fast.yaml` is real-provider: execute only the exact user-approved production command
+- otherwise: `./kilroy attractor run --detach --graph demo/rogue/rogue_fast.dot --config demo/rogue/run-fast.yaml --allow-test-shim --run-id rogue-fast-validation-$(date +%Y%m%d-%H%M%S) --logs-root ~/.local/state/kilroy/attractor`
+
+Expected: run starts, logs directory created, and `live.json`/`progress.ndjson` appear.
 
 **Step 5: Commit**
 
 ```bash
-git add docs/plans/2026-02-10-attractor-rogue-best-of-both-remediation.md postmortem-rogue-best-of-both-fixes.md
-git commit -m "chore: record regression gate evidence and rogue-fast validation run handoff"
+git add postmortem-rogue-best-of-both-fixes.md
+git commit -m "postmortem: record regression evidence and rogue-fast validation run details"
 ```
 
-## Execution Notes
+## Cross-Task Guardrails
 
-- Keep commits delta-oriented and small; do not batch multiple tasks into one commit.
-- Run the exact test command listed after each implementation step; do not skip failing-test confirmation.
-- If a task touches shared engine behavior, re-run `go test ./internal/attractor/...` before committing that task.
-- If a task changes error mapping or provider policy, re-run `go test ./internal/llm/...` before committing that task.
+- Keep each commit delta-oriented and scoped to one task.
+- Do not skip failing-test confirmation before implementation.
+- Re-run `go test ./internal/attractor/... -count=1` after any task that touches engine traversal/routing.
+- Re-run `go test ./internal/llm/... -count=1` after any task that touches provider error handling.
 
-## Quick Start Command Sequence
+## Suggested Execution Branch
 
 ```bash
-# Task-by-task execution flow
 git checkout -b plan/rogue-best-of-both-remediation-20260210
-go test ./internal/attractor/runtime -run 'WriteJSONAtomic_ReplacesTargetWithoutPartialFile' -count=1
-# implement Task 1, then commit
-# continue task order 2 -> 13
 ```
