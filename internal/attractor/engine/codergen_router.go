@@ -1528,7 +1528,7 @@ const defaultCodexOutputSchema = `{
     "summary": { "type": "string" }
   },
   "required": ["final", "summary"],
-  "additionalProperties": true
+  "additionalProperties": false
 }
 `
 

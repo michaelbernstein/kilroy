@@ -12,13 +12,13 @@ import (
 	"github.com/strongdm/kilroy/internal/attractor/runtime"
 )
 
-func TestDefaultCodexOutputSchema_AllowsAdditionalPropertiesAndRequiresCoreFields(t *testing.T) {
+func TestDefaultCodexOutputSchema_DisallowsAdditionalPropertiesAndRequiresCoreFields(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal([]byte(defaultCodexOutputSchema), &schema); err != nil {
 		t.Fatalf("unmarshal schema: %v", err)
 	}
-	if got, ok := schema["additionalProperties"].(bool); !ok || !got {
-		t.Fatalf("additionalProperties: got %#v want true", schema["additionalProperties"])
+	if got, ok := schema["additionalProperties"].(bool); !ok || got {
+		t.Fatalf("additionalProperties: got %#v want false", schema["additionalProperties"])
 	}
 	req, ok := schema["required"].([]any)
 	if !ok {
