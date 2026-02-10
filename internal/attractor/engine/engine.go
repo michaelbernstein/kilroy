@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	rdebug "runtime/debug"
 	"sort"
@@ -810,6 +811,24 @@ func (e *Engine) executeNode(ctx context.Context, node *model.Node) (runtime.Out
 			out.FailureReason = cause.Error()
 		}
 	}
+	// Enrich timeout outcomes with diagnostic metadata so downstream consumers
+	// know the node timed out (vs. crashed) and what state the worktree was left in.
+	// This runs after status.json is read so it applies regardless of handler path.
+	if (out.Status == runtime.StatusFail || out.Status == runtime.StatusRetry) && ctx.Err() == context.DeadlineExceeded {
+		if out.Meta == nil {
+			out.Meta = map[string]any{}
+		}
+		out.Meta["timeout"] = true
+		if timeout := effectiveStageTimeout(node, e.Options.StageTimeout); timeout > 0 {
+			out.Meta["timeout_seconds"] = int(timeout.Seconds())
+		}
+		partial := e.harvestPartialStatus(stageDir, node)
+		if partial != nil {
+			out.Meta["partial_status"] = partial
+			_ = writeJSON(filepath.Join(stageDir, "partial_status.json"), partial)
+		}
+	}
+
 	// Ensure required fields are present.
 	if out.ContextUpdates == nil {
 		out.ContextUpdates = map[string]any{}
@@ -828,6 +847,32 @@ func (e *Engine) executeNode(ctx context.Context, node *model.Node) (runtime.Out
 	// Write status.json (canonical metaspec shape).
 	_ = writeJSON(filepath.Join(stageDir, "status.json"), out)
 	return out, nil
+}
+
+// harvestPartialStatus checks the worktree after a timeout to determine what
+// state the node left behind. This is best-effort diagnostic data — it never
+// blocks or fails the run.
+func (e *Engine) harvestPartialStatus(stageDir string, node *model.Node) map[string]any {
+	if e.WorktreeDir == "" {
+		return nil
+	}
+	partial := map[string]any{
+		"node_id":   node.ID,
+		"harvested": true,
+	}
+	// Count files changed in worktree relative to HEAD.
+	diffOut, err := exec.CommandContext(context.Background(), "git", "-C", e.WorktreeDir, "diff", "--name-only", "HEAD").Output()
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(string(diffOut)), "\n")
+		changed := 0
+		for _, l := range lines {
+			if strings.TrimSpace(l) != "" {
+				changed++
+			}
+		}
+		partial["files_changed"] = changed
+	}
+	return partial
 }
 
 func (e *Engine) executeWithRetry(ctx context.Context, node *model.Node, retries map[string]int) (runtime.Outcome, error) {
