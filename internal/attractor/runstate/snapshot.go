@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -156,6 +157,9 @@ func pidAlive(pid int) bool {
 }
 
 func pidZombie(pid int) bool {
+	if !procFSAvailable() {
+		return pidZombieFromPS(pid)
+	}
 	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
 	b, err := os.ReadFile(statPath)
 	if err != nil {
@@ -168,6 +172,24 @@ func pidZombie(pid int) bool {
 	}
 	state := line[closeIdx+2]
 	return state == 'Z' || state == 'X'
+}
+
+func pidZombieFromPS(pid int) bool {
+	out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	state := strings.TrimSpace(string(out))
+	if state == "" {
+		return false
+	}
+	c := state[0]
+	return c == 'Z' || c == 'X'
+}
+
+func procFSAvailable() bool {
+	_, err := os.Stat("/proc/self/stat")
+	return err == nil
 }
 
 func readLiveEvent(path string) (map[string]any, bool, error) {

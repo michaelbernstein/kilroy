@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +15,12 @@ import (
 
 	"github.com/strongdm/kilroy/internal/attractor/runstate"
 )
+
+type verifiedProcess struct {
+	PID            int
+	StartTime      uint64
+	StartTimeKnown bool
+}
 
 func attractorStop(args []string) {
 	os.Exit(runAttractorStop(args, os.Stdout, os.Stderr))
@@ -74,60 +82,69 @@ func runAttractorStop(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "pid %d is not running\n", snapshot.PID)
 		return 1
 	}
-	if err := verifyAttractorRunPID(snapshot.PID, logsRoot, snapshot.RunID); err != nil {
+	verified, err := verifyAttractorRunPID(snapshot.PID, logsRoot, snapshot.RunID)
+	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 
-	proc, err := os.FindProcess(snapshot.PID)
+	proc, err := os.FindProcess(verified.PID)
 	if err != nil {
-		fmt.Fprintf(stderr, "find pid %d: %v\n", snapshot.PID, err)
+		fmt.Fprintf(stderr, "find pid %d: %v\n", verified.PID, err)
+		return 1
+	}
+	if err := verifyProcessIdentity(verified); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	if err := proc.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		fmt.Fprintf(stderr, "send SIGTERM to pid %d: %v\n", snapshot.PID, err)
+		fmt.Fprintf(stderr, "send SIGTERM to pid %d: %v\n", verified.PID, err)
 		return 1
 	}
 
-	if waitForPIDExit(snapshot.PID, grace) {
-		fmt.Fprintf(stdout, "pid=%d\nstopped=graceful\n", snapshot.PID)
+	if waitForPIDExit(verified, grace) {
+		fmt.Fprintf(stdout, "pid=%d\nstopped=graceful\n", verified.PID)
 		return 0
 	}
 
 	if !force {
-		fmt.Fprintf(stderr, "pid %d did not exit within %s\n", snapshot.PID, grace)
+		fmt.Fprintf(stderr, "pid %d did not exit within %s\n", verified.PID, grace)
+		return 1
+	}
+	if err := verifyProcessIdentity(verified); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
 
 	if err := proc.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		fmt.Fprintf(stderr, "send SIGKILL to pid %d: %v\n", snapshot.PID, err)
+		fmt.Fprintf(stderr, "send SIGKILL to pid %d: %v\n", verified.PID, err)
 		return 1
 	}
 	forceWait := grace
 	if forceWait < time.Second {
 		forceWait = time.Second
 	}
-	if !waitForPIDExit(snapshot.PID, forceWait) {
-		fmt.Fprintf(stderr, "pid %d did not exit after SIGKILL\n", snapshot.PID)
+	if !waitForPIDExit(verified, forceWait) {
+		fmt.Fprintf(stderr, "pid %d did not exit after SIGKILL\n", verified.PID)
 		return 1
 	}
-	fmt.Fprintf(stdout, "pid=%d\nstopped=forced\n", snapshot.PID)
+	fmt.Fprintf(stdout, "pid=%d\nstopped=forced\n", verified.PID)
 	return 0
 }
 
-func waitForPIDExit(pid int, grace time.Duration) bool {
-	if !pidRunning(pid) {
+func waitForPIDExit(proc verifiedProcess, grace time.Duration) bool {
+	if !pidRunning(proc.PID) || !processIdentityMatches(proc) {
 		return true
 	}
 	deadline := time.Now().Add(grace)
 	poll := adaptiveGracePoll(grace)
 	for time.Now().Before(deadline) {
 		time.Sleep(poll)
-		if !pidRunning(pid) {
+		if !pidRunning(proc.PID) || !processIdentityMatches(proc) {
 			return true
 		}
 	}
-	return !pidRunning(pid)
+	return !pidRunning(proc.PID) || !processIdentityMatches(proc)
 }
 
 func adaptiveGracePoll(grace time.Duration) time.Duration {
@@ -156,6 +173,9 @@ func pidRunning(pid int) bool {
 }
 
 func pidZombie(pid int) bool {
+	if !procFSAvailable() {
+		return pidZombieFromPS(pid)
+	}
 	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
 	b, err := os.ReadFile(statPath)
 	if err != nil {
@@ -170,13 +190,30 @@ func pidZombie(pid int) bool {
 	return state == 'Z' || state == 'X'
 }
 
-func verifyAttractorRunPID(pid int, logsRoot string, runID string) error {
+func pidZombieFromPS(pid int) bool {
+	out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	state := strings.TrimSpace(string(out))
+	if state == "" {
+		return false
+	}
+	first := state[0]
+	return first == 'Z' || first == 'X'
+}
+
+func verifyAttractorRunPID(pid int, logsRoot string, runID string) (verifiedProcess, error) {
+	if err := verifyPIDExecutableMatchesSelf(pid); err != nil {
+		return verifiedProcess{}, err
+	}
+
 	args, err := readPIDCmdline(pid)
 	if err != nil {
-		return fmt.Errorf("refusing to signal pid %d: cannot read process command line: %w", pid, err)
+		return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: cannot read process command line: %w", pid, err)
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("refusing to signal pid %d: empty process command line", pid)
+		return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: empty process command line", pid)
 	}
 
 	attractorIdx := -1
@@ -187,43 +224,194 @@ func verifyAttractorRunPID(pid int, logsRoot string, runID string) error {
 		}
 	}
 	if attractorIdx < 0 || attractorIdx+1 >= len(args) {
-		return fmt.Errorf("refusing to signal pid %d: process is not an attractor run/resume command", pid)
+		return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: process is not an attractor run/resume command", pid)
 	}
 	sub := strings.TrimSpace(args[attractorIdx+1])
 	if sub != "run" && sub != "resume" {
-		return fmt.Errorf("refusing to signal pid %d: process is attractor %q, not run/resume", pid, sub)
+		return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: process is attractor %q, not run/resume", pid, sub)
 	}
 
-	if pidLogsRoot, ok := cmdlineLogsRoot(args); ok {
+	expectedRunID := resolveExpectedRunID(runID, logsRoot)
+	pidRunID, hasRunID := cmdlineRunID(args)
+	pidLogsRoot, hasLogsRoot := cmdlineLogsRoot(args)
+
+	if hasRunID && expectedRunID != "" {
+		if strings.TrimSpace(pidRunID) != expectedRunID {
+			return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: --run-id mismatch (pid=%q expected=%q)", pid, pidRunID, expectedRunID)
+		}
+		return captureVerifiedProcess(pid)
+	}
+	if hasLogsRoot {
 		if !samePath(pidLogsRoot, logsRoot) {
-			return fmt.Errorf("refusing to signal pid %d: --logs-root mismatch (pid=%q requested=%q)", pid, pidLogsRoot, logsRoot)
+			return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: --logs-root mismatch (pid=%q requested=%q)", pid, pidLogsRoot, logsRoot)
 		}
-		return nil
+		return captureVerifiedProcess(pid)
 	}
+	if hasRunID {
+		if expectedRunID != "" && strings.TrimSpace(pidRunID) != expectedRunID {
+			return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: --run-id mismatch (pid=%q expected=%q)", pid, pidRunID, expectedRunID)
+		}
+		return captureVerifiedProcess(pid)
+	}
+	return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: process command line has no --logs-root/--run-id", pid)
+}
 
-	if pidRunID, ok := cmdlineRunID(args); ok && strings.TrimSpace(runID) != "" {
-		if strings.TrimSpace(pidRunID) != strings.TrimSpace(runID) {
-			return fmt.Errorf("refusing to signal pid %d: --run-id mismatch (pid=%q snapshot=%q)", pid, pidRunID, runID)
-		}
+func resolveExpectedRunID(snapshotRunID string, logsRoot string) string {
+	expected := strings.TrimSpace(snapshotRunID)
+	if expected != "" {
+		return expected
+	}
+	manifestRunID, err := readManifestRunID(logsRoot)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(manifestRunID)
+}
+
+func verifyPIDExecutableMatchesSelf(pid int) error {
+	if !procFSAvailable() {
 		return nil
 	}
-	return fmt.Errorf("refusing to signal pid %d: process command line has no --logs-root/--run-id", pid)
+	selfExe, err := readProcessExePath("self")
+	if err != nil {
+		return fmt.Errorf("refusing to signal pid %d: cannot resolve current executable: %w", pid, err)
+	}
+	targetExe, err := readProcessExePath(strconv.Itoa(pid))
+	if err != nil {
+		return fmt.Errorf("refusing to signal pid %d: cannot resolve target executable: %w", pid, err)
+	}
+	if !samePath(selfExe, targetExe) {
+		return fmt.Errorf("refusing to signal pid %d: executable mismatch (target=%q current=%q)", pid, targetExe, selfExe)
+	}
+	return nil
+}
+
+func readProcessExePath(pidToken string) (string, error) {
+	linkPath := filepath.Join("/proc", pidToken, "exe")
+	resolved, err := os.Readlink(linkPath)
+	if err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(resolved); err == nil {
+		resolved = abs
+	}
+	if eval, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = eval
+	}
+	return resolved, nil
+}
+
+func readManifestRunID(logsRoot string) (string, error) {
+	path := filepath.Join(logsRoot, "manifest.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return "", err
+	}
+	runID := strings.TrimSpace(fmt.Sprint(doc["run_id"]))
+	if runID == "" || runID == "<nil>" {
+		return "", fmt.Errorf("manifest run_id is empty")
+	}
+	return runID, nil
+}
+
+func captureVerifiedProcess(pid int) (verifiedProcess, error) {
+	if !procFSAvailable() {
+		return verifiedProcess{PID: pid}, nil
+	}
+	start, err := readPIDStartTime(pid)
+	if err != nil {
+		return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: cannot read process start time: %w", pid, err)
+	}
+	return verifiedProcess{PID: pid, StartTime: start, StartTimeKnown: true}, nil
+}
+
+func verifyProcessIdentity(proc verifiedProcess) error {
+	if !pidRunning(proc.PID) {
+		return fmt.Errorf("refusing to signal pid %d: process is no longer running", proc.PID)
+	}
+	if !proc.StartTimeKnown {
+		return nil
+	}
+	start, err := readPIDStartTime(proc.PID)
+	if err != nil {
+		return fmt.Errorf("refusing to signal pid %d: cannot read process start time: %w", proc.PID, err)
+	}
+	if start != proc.StartTime {
+		return fmt.Errorf("refusing to signal pid %d: process identity changed (pid was reused)", proc.PID)
+	}
+	return nil
+}
+
+func processIdentityMatches(proc verifiedProcess) bool {
+	if !proc.StartTimeKnown {
+		return true
+	}
+	start, err := readPIDStartTime(proc.PID)
+	if err != nil {
+		return false
+	}
+	return start == proc.StartTime
+}
+
+func readPIDStartTime(pid int) (uint64, error) {
+	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
+	b, err := os.ReadFile(statPath)
+	if err != nil {
+		return 0, err
+	}
+	line := string(b)
+	closeIdx := strings.LastIndexByte(line, ')')
+	if closeIdx < 0 || closeIdx+2 >= len(line) {
+		return 0, fmt.Errorf("malformed stat record")
+	}
+	fields := strings.Fields(line[closeIdx+2:])
+	if len(fields) < 20 {
+		return 0, fmt.Errorf("malformed stat fields")
+	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return start, nil
 }
 
 func readPIDCmdline(pid int) ([]string, error) {
+	if !procFSAvailable() {
+		return readPIDCmdlineFromPS(pid)
+	}
 	path := filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	parts := strings.Split(string(b), "\x00")
+	return parseCmdlineParts(string(b), "\x00"), nil
+}
+
+func readPIDCmdlineFromPS(pid int) ([]string, error) {
+	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return nil, err
+	}
+	cmdline := strings.TrimSpace(string(out))
+	if cmdline == "" {
+		return nil, fmt.Errorf("empty command line")
+	}
+	return parseCmdlineParts(cmdline, " "), nil
+}
+
+func parseCmdlineParts(raw string, sep string) []string {
+	parts := strings.Split(raw, sep)
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if s := strings.TrimSpace(part); s != "" {
 			out = append(out, s)
 		}
 	}
-	return out, nil
+	return out
 }
 
 func cmdlineLogsRoot(args []string) (string, bool) {
@@ -260,4 +448,9 @@ func samePath(a, b string) bool {
 		return false
 	}
 	return filepath.Clean(absA) == filepath.Clean(absB)
+}
+
+func procFSAvailable() bool {
+	_, err := os.Stat("/proc/self/stat")
+	return err == nil
 }

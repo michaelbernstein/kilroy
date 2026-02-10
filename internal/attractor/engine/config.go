@@ -275,6 +275,24 @@ func validateConfig(cfg *RunConfigFile) error {
 			return fmt.Errorf("runtime_policy.stall_check_interval_ms must be > 0 when stall_timeout_ms > 0")
 		}
 	}
+	if cfg.Preflight.PromptProbes.TimeoutMS != nil && *cfg.Preflight.PromptProbes.TimeoutMS < 0 {
+		return fmt.Errorf("preflight.prompt_probes.timeout_ms must be >= 0")
+	}
+	if cfg.Preflight.PromptProbes.Retries != nil && *cfg.Preflight.PromptProbes.Retries < 0 {
+		return fmt.Errorf("preflight.prompt_probes.retries must be >= 0")
+	}
+	if cfg.Preflight.PromptProbes.BaseDelayMS != nil && *cfg.Preflight.PromptProbes.BaseDelayMS < 0 {
+		return fmt.Errorf("preflight.prompt_probes.base_delay_ms must be >= 0")
+	}
+	if cfg.Preflight.PromptProbes.MaxDelayMS != nil && *cfg.Preflight.PromptProbes.MaxDelayMS < 0 {
+		return fmt.Errorf("preflight.prompt_probes.max_delay_ms must be >= 0")
+	}
+	if cfg.Preflight.PromptProbes.BaseDelayMS != nil && cfg.Preflight.PromptProbes.MaxDelayMS != nil {
+		if *cfg.Preflight.PromptProbes.BaseDelayMS > 0 && *cfg.Preflight.PromptProbes.MaxDelayMS > 0 &&
+			*cfg.Preflight.PromptProbes.MaxDelayMS < *cfg.Preflight.PromptProbes.BaseDelayMS {
+			return fmt.Errorf("preflight.prompt_probes.max_delay_ms must be >= base_delay_ms when both are > 0")
+		}
+	}
 	if len(cfg.Preflight.PromptProbes.Transports) > 0 {
 		normalized := make([]string, 0, len(cfg.Preflight.PromptProbes.Transports))
 		seen := map[string]bool{}
