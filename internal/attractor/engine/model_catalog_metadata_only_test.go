@@ -53,7 +53,7 @@ func TestRunWithConfig_ModelCatalogMetadata_DoesNotAffectProviderRouting_WithFor
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = pinned
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"

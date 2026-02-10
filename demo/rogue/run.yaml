@@ -12,6 +12,7 @@ llm:
   providers:
     kimi:
       backend: api
+      failover: [zai]
       api:
         protocol: anthropic_messages
         api_key_env: KIMI_API_KEY
@@ -20,6 +21,7 @@ llm:
         profile_family: openai
     zai:
       backend: api
+      failover: []
       api:
         protocol: openai_chat_completions
         api_key_env: ZAI_API_KEY

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/strongdm/kilroy/internal/attractor/model"
+	"github.com/strongdm/kilroy/internal/attractor/modeldb"
 	"github.com/strongdm/kilroy/internal/llm"
 	"github.com/strongdm/kilroy/internal/providerspec"
 )
@@ -76,7 +77,7 @@ type preflightAPIPromptProbeResult struct {
 	PolicyHint string
 }
 
-func runProviderCLIPreflight(ctx context.Context, g *model.Graph, runtimes map[string]ProviderRuntime, cfg *RunConfigFile, opts RunOptions) (*providerPreflightReport, error) {
+func runProviderCLIPreflight(ctx context.Context, g *model.Graph, runtimes map[string]ProviderRuntime, cfg *RunConfigFile, opts RunOptions, catalog *modeldb.Catalog) (*providerPreflightReport, error) {
 	report := &providerPreflightReport{
 		GeneratedAt:         time.Now().UTC().Format(time.RFC3339Nano),
 		CLIProfile:          normalizedCLIProfile(cfg),
@@ -89,7 +90,7 @@ func runProviderCLIPreflight(ctx context.Context, g *model.Graph, runtimes map[s
 		_ = writePreflightReport(opts.LogsRoot, report)
 	}()
 
-	if err := runProviderAPIPreflight(ctx, g, runtimes, cfg, opts, report); err != nil {
+	if err := runProviderAPIPreflight(ctx, g, runtimes, cfg, opts, report, catalog); err != nil {
 		return report, err
 	}
 
@@ -100,7 +101,7 @@ func runProviderCLIPreflight(ctx context.Context, g *model.Graph, runtimes map[s
 	return report, nil
 }
 
-func runProviderAPIPreflight(ctx context.Context, g *model.Graph, runtimes map[string]ProviderRuntime, cfg *RunConfigFile, opts RunOptions, report *providerPreflightReport) error {
+func runProviderAPIPreflight(ctx context.Context, g *model.Graph, runtimes map[string]ProviderRuntime, cfg *RunConfigFile, opts RunOptions, report *providerPreflightReport, catalog *modeldb.Catalog) error {
 	providers := usedAPIProviders(g, runtimes)
 	if len(providers) == 0 {
 		report.addCheck(providerPreflightCheck{
@@ -203,7 +204,7 @@ func runProviderAPIPreflight(ctx context.Context, g *model.Graph, runtimes map[s
 			return fmt.Errorf("preflight: provider %s api adapter is not available", provider)
 		}
 
-		targets, targetErr := usedAPIPromptProbeTargetsForProvider(g, runtimes, provider, opts, transports)
+		targets, targetErr := usedAPIPromptProbeTargetsForProvider(g, runtimes, provider, opts, transports, catalog)
 		if targetErr != nil {
 			report.addCheck(providerPreflightCheck{
 				Name:     "provider_prompt_probe",
@@ -987,7 +988,46 @@ func usedCLIProviders(g *model.Graph, runtimes map[string]ProviderRuntime) []str
 }
 
 func usedAPIProviders(g *model.Graph, runtimes map[string]ProviderRuntime) []string {
-	return usedProvidersForBackend(g, runtimes, BackendAPI)
+	roots := usedProvidersForBackend(g, runtimes, BackendAPI)
+	if len(roots) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	queue := make([]string, 0, len(roots))
+	for _, provider := range roots {
+		provider = normalizeProviderKey(provider)
+		if provider == "" || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		queue = append(queue, provider)
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		rt, ok := runtimes[cur]
+		if !ok || rt.Backend != BackendAPI {
+			continue
+		}
+		for _, rawNext := range rt.Failover {
+			next := normalizeProviderKey(rawNext)
+			if next == "" || seen[next] {
+				continue
+			}
+			nextRT, ok := runtimes[next]
+			if !ok || nextRT.Backend != BackendAPI {
+				continue
+			}
+			seen[next] = true
+			queue = append(queue, next)
+		}
+	}
+	providers := make([]string, 0, len(seen))
+	for provider := range seen {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers
 }
 
 func usedProvidersForBackend(g *model.Graph, runtimes map[string]ProviderRuntime, backend BackendKind) []string {
@@ -1025,7 +1065,7 @@ func usedAPIModelsForProvider(g *model.Graph, runtimes map[string]ProviderRuntim
 	return usedModelsForProviderBackend(g, runtimes, provider, BackendAPI, opts)
 }
 
-func usedAPIPromptProbeTargetsForProvider(g *model.Graph, runtimes map[string]ProviderRuntime, provider string, opts RunOptions, transports []string) ([]preflightAPIPromptProbeTarget, error) {
+func usedAPIPromptProbeTargetsForProvider(g *model.Graph, runtimes map[string]ProviderRuntime, provider string, opts RunOptions, transports []string, catalog *modeldb.Catalog) ([]preflightAPIPromptProbeTarget, error) {
 	provider = normalizeProviderKey(provider)
 	if provider == "" || g == nil {
 		return nil, nil
@@ -1033,7 +1073,6 @@ func usedAPIPromptProbeTargetsForProvider(g *model.Graph, runtimes map[string]Pr
 	if len(transports) == 0 {
 		transports = []string{preflightAPIPromptProbeTransportComplete}
 	}
-	forcedModel, forced := forceModelForProvider(opts.ForceModels, provider)
 
 	seen := map[string]bool{}
 	targets := []preflightAPIPromptProbeTarget{}
@@ -1042,17 +1081,31 @@ func usedAPIPromptProbeTargetsForProvider(g *model.Graph, runtimes map[string]Pr
 			continue
 		}
 		nodeProvider := normalizeProviderKey(n.Attr("llm_provider", ""))
-		if nodeProvider == "" || nodeProvider != provider {
+		if nodeProvider == "" {
 			continue
 		}
 		rt, ok := runtimes[nodeProvider]
 		if !ok || rt.Backend != BackendAPI {
 			continue
 		}
+		if !providerInFailoverPath(nodeProvider, provider, runtimes) {
+			continue
+		}
 
-		modelID := modelIDForNode(n)
-		if forced {
-			modelID = forcedModel
+		sourceModel := modelIDForNode(n)
+		if forcedSourceModel, forced := forceModelForProvider(opts.ForceModels, nodeProvider); forced {
+			sourceModel = forcedSourceModel
+		}
+		if sourceModel == "" {
+			continue
+		}
+		modelID := sourceModel
+		if provider != nodeProvider {
+			if forcedTargetModel, forced := forceModelForProvider(opts.ForceModels, provider); forced {
+				modelID = forcedTargetModel
+			} else {
+				modelID = strings.TrimSpace(pickFailoverModelFromRuntime(provider, runtimes, catalog, sourceModel))
+			}
 		}
 		if modelID == "" {
 			continue
@@ -1101,6 +1154,46 @@ func usedAPIPromptProbeTargetsForProvider(g *model.Graph, runtimes map[string]Pr
 		return a.Transport < b.Transport
 	})
 	return targets, nil
+}
+
+func providerInFailoverPath(sourceProvider string, targetProvider string, runtimes map[string]ProviderRuntime) bool {
+	sourceProvider = normalizeProviderKey(sourceProvider)
+	targetProvider = normalizeProviderKey(targetProvider)
+	if sourceProvider == "" || targetProvider == "" {
+		return false
+	}
+	if sourceProvider == targetProvider {
+		return true
+	}
+	seen := map[string]bool{sourceProvider: true}
+	queue := []string{sourceProvider}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		rt, ok := runtimes[cur]
+		if !ok || rt.Backend != BackendAPI {
+			continue
+		}
+		for _, rawNext := range rt.Failover {
+			next := normalizeProviderKey(rawNext)
+			if next == "" {
+				continue
+			}
+			nextRT, ok := runtimes[next]
+			if !ok || nextRT.Backend != BackendAPI {
+				continue
+			}
+			if next == targetProvider {
+				return true
+			}
+			if seen[next] {
+				continue
+			}
+			seen[next] = true
+			queue = append(queue, next)
+		}
+	}
+	return false
 }
 
 func preflightAPIPromptProbeRequest(provider string, modelID string, mode string, reasoning string, runtimes map[string]ProviderRuntime) (llm.Request, error) {

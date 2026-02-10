@@ -407,7 +407,7 @@ func TestRunWithConfig_APIBackend_AgentLoop_WritesAgentEventsAndPassesReasoningE
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = pinned
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
@@ -472,7 +472,7 @@ func TestRunWithConfig_APIBackend_OneShot_WritesRequestAndResponseArtifacts(t *t
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = pinned
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
@@ -538,7 +538,7 @@ func TestRunWithConfig_APIBackend_ForceModelOverride_UsesForcedModel(t *testing.
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = pinned
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
@@ -606,7 +606,7 @@ func TestRunWithConfig_APIBackend_AutoStatusFalse_FailsWhenNoStatusWritten(t *te
 	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = pinned
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"

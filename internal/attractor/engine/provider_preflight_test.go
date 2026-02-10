@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/strongdm/kilroy/internal/attractor/model"
+	"github.com/strongdm/kilroy/internal/attractor/modeldb"
 )
 
 type preflightReportDoc struct {
@@ -158,7 +161,7 @@ func TestRunWithConfig_ForceModel_BypassesCatalogGate(t *testing.T) {
 	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:1"
 	cfg.LLM.CLIProfile = "real"
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = catalog
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
@@ -604,7 +607,7 @@ func TestRunWithConfig_PreflightPromptProbe_UsesOnlyAPIProvidersInGraph(t *testi
 	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:1"
 	cfg.LLM.CLIProfile = "real"
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai":    {Backend: BackendAPI},
+		"openai":    {Backend: BackendAPI, Failover: []string{}},
 		"anthropic": {Backend: BackendAPI},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = catalog
@@ -693,7 +696,7 @@ func TestRunWithConfig_PreflightPromptProbe_APIAgentLoopShape_UsesTools(t *testi
 	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:1"
 	cfg.LLM.CLIProfile = "real"
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = catalog
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
@@ -786,7 +789,7 @@ func TestRunWithConfig_PreflightPromptProbe_APIOneShotShape_DoesNotUseTools(t *t
 	cfg.CXDB.HTTPBaseURL = "http://127.0.0.1:1"
 	cfg.LLM.CLIProfile = "real"
 	cfg.LLM.Providers = map[string]ProviderConfig{
-		"openai": {Backend: BackendAPI},
+		"openai": {Backend: BackendAPI, Failover: []string{}},
 	}
 	cfg.ModelDB.OpenRouterModelInfoPath = catalog
 	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
@@ -1139,6 +1142,117 @@ digraph G {
 	}
 	if !sawKimiPolicyDetails {
 		t.Fatalf("missing provider_prompt_probe policy details for kimi")
+	}
+}
+
+func TestProviderPreflight_PromptProbe_IncludesFailoverTargets(t *testing.T) {
+	g := model.NewGraph("preflight")
+	n := model.NewNode("impl")
+	n.Attrs["shape"] = "box"
+	n.Attrs["llm_provider"] = "kimi"
+	n.Attrs["llm_model"] = "kimi-k2.5"
+	n.Attrs["codergen_mode"] = "agent_loop"
+	n.Attrs["reasoning_effort"] = "high"
+	if err := g.AddNode(n); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	runtimes := map[string]ProviderRuntime{
+		"kimi": {
+			Key:           "kimi",
+			Backend:       BackendAPI,
+			ProfileFamily: "openai",
+			Failover:      []string{"zai"},
+		},
+		"zai": {
+			Key:           "zai",
+			Backend:       BackendAPI,
+			ProfileFamily: "openai",
+		},
+	}
+
+	targets, err := usedAPIPromptProbeTargetsForProvider(
+		g,
+		runtimes,
+		"zai",
+		RunOptions{},
+		[]string{preflightAPIPromptProbeTransportComplete},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("usedAPIPromptProbeTargetsForProvider: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("targets len=%d want 1", len(targets))
+	}
+	target := targets[0]
+	if target.Provider != "zai" {
+		t.Fatalf("target provider=%q want zai", target.Provider)
+	}
+	if target.Model != "glm-4.7" {
+		t.Fatalf("target model=%q want glm-4.7", target.Model)
+	}
+	if target.Mode != "agent_loop" {
+		t.Fatalf("target mode=%q want agent_loop", target.Mode)
+	}
+	if got := len(target.Request.Tools); got == 0 {
+		t.Fatalf("expected agent_loop failover probe to include tools")
+	}
+	if got := usedAPIProviders(g, runtimes); strings.Join(got, ",") != "kimi,zai" {
+		t.Fatalf("used api providers=%v want [kimi zai]", got)
+	}
+}
+
+func TestProviderPreflight_PromptProbe_FailoverModelSelectionMatchesRuntime(t *testing.T) {
+	g := model.NewGraph("preflight")
+	n := model.NewNode("impl")
+	n.Attrs["shape"] = "box"
+	n.Attrs["llm_provider"] = "openai"
+	n.Attrs["llm_model"] = "gpt-5.2-codex"
+	n.Attrs["codergen_mode"] = "one_shot"
+	if err := g.AddNode(n); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	runtimes := map[string]ProviderRuntime{
+		"openai": {
+			Key:           "openai",
+			Backend:       BackendAPI,
+			ProfileFamily: "openai",
+			Failover:      []string{"anthropic"},
+		},
+		"anthropic": {
+			Key:           "anthropic",
+			Backend:       BackendAPI,
+			ProfileFamily: "anthropic",
+		},
+	}
+	catalog := &modeldb.Catalog{
+		Models: map[string]modeldb.ModelEntry{
+			"us/claude-opus-4-6-20260205": {
+				Provider: "anthropic",
+				Mode:     "chat",
+			},
+		},
+	}
+
+	expectedModel := pickFailoverModelFromRuntime("anthropic", runtimes, catalog, "gpt-5.2-codex")
+	targets, err := usedAPIPromptProbeTargetsForProvider(
+		g,
+		runtimes,
+		"anthropic",
+		RunOptions{},
+		[]string{preflightAPIPromptProbeTransportComplete},
+		catalog,
+	)
+	if err != nil {
+		t.Fatalf("usedAPIPromptProbeTargetsForProvider: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("targets len=%d want 1", len(targets))
+	}
+	if got := targets[0].Model; got != expectedModel {
+		t.Fatalf("failover probe model=%q want runtime-selected %q", got, expectedModel)
 	}
 }
 

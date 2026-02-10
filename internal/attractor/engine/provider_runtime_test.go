@@ -32,6 +32,49 @@ func TestResolveProviderRuntimes_MergesBuiltinAndConfigOverrides(t *testing.T) {
 	}
 }
 
+func TestResolveProviderRuntimes_ExplicitEmptyFailoverDisablesBuiltinFallback(t *testing.T) {
+	cfg := &RunConfigFile{}
+	cfg.LLM.Providers = map[string]ProviderConfig{
+		"zai": {
+			Backend:  BackendAPI,
+			Failover: []string{},
+			API: ProviderAPIConfig{
+				Protocol:  "openai_chat_completions",
+				APIKeyEnv: "ZAI_API_KEY",
+			},
+		},
+	}
+
+	rt, err := resolveProviderRuntimes(cfg)
+	if err != nil {
+		t.Fatalf("resolveProviderRuntimes: %v", err)
+	}
+	if got := len(rt["zai"].Failover); got != 0 {
+		t.Fatalf("zai failover len=%d want 0 for explicit empty override", got)
+	}
+}
+
+func TestResolveProviderRuntimes_OmittedFailoverUsesBuiltinFallback(t *testing.T) {
+	cfg := &RunConfigFile{}
+	cfg.LLM.Providers = map[string]ProviderConfig{
+		"zai": {
+			Backend: BackendAPI,
+			API: ProviderAPIConfig{
+				Protocol:  "openai_chat_completions",
+				APIKeyEnv: "ZAI_API_KEY",
+			},
+		},
+	}
+
+	rt, err := resolveProviderRuntimes(cfg)
+	if err != nil {
+		t.Fatalf("resolveProviderRuntimes: %v", err)
+	}
+	if got := rt["zai"].Failover; len(got) != 2 || got[0] != "openai" || got[1] != "kimi" {
+		t.Fatalf("zai failover=%v want [openai kimi]", got)
+	}
+}
+
 func TestResolveProviderRuntimes_RejectsCanonicalAliasCollisions(t *testing.T) {
 	cfg := &RunConfigFile{}
 	cfg.LLM.Providers = map[string]ProviderConfig{

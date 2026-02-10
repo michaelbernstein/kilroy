@@ -54,7 +54,8 @@ func TestKimiCodingAndZai_APIIntegration(t *testing.T) {
 		cfg.Git.RunBranchPrefix = "attractor/run"
 		cfg.LLM.Providers = map[string]ProviderConfig{
 			provider: {
-				Backend: BackendAPI,
+				Backend:  BackendAPI,
+				Failover: []string{},
 				API: ProviderAPIConfig{
 					APIKeyEnv: keyEnv,
 					BaseURL:   baseURL,
@@ -135,7 +136,8 @@ func TestKimiAgentLoop_UsesNativeKimiProviderRouting(t *testing.T) {
 	cfg.Git.RunBranchPrefix = "attractor/run"
 	cfg.LLM.Providers = map[string]ProviderConfig{
 		"kimi": {
-			Backend: BackendAPI,
+			Backend:  BackendAPI,
+			Failover: []string{},
 			API: ProviderAPIConfig{
 				APIKeyEnv: "KIMI_API_KEY",
 				BaseURL:   srv.URL + "/coding",
@@ -207,7 +209,8 @@ func TestKimiCoding_APIIntegration_EnforcesStreamingAndMinMaxTokensContract(t *t
 	cfg.Git.RunBranchPrefix = "attractor/run"
 	cfg.LLM.Providers = map[string]ProviderConfig{
 		"kimi": {
-			Backend: BackendAPI,
+			Backend:  BackendAPI,
+			Failover: []string{},
 			API: ProviderAPIConfig{
 				APIKeyEnv: "KIMI_API_KEY",
 				BaseURL:   srv.URL + "/coding",
@@ -294,7 +297,8 @@ func TestKimiAgentLoop_ToolRoundTrip_DoesNotDropToolResponses(t *testing.T) {
 	cfg.Git.RunBranchPrefix = "attractor/run"
 	cfg.LLM.Providers = map[string]ProviderConfig{
 		"kimi": {
-			Backend: BackendAPI,
+			Backend:  BackendAPI,
+			Failover: []string{},
 			API: ProviderAPIConfig{
 				APIKeyEnv: "KIMI_API_KEY",
 				BaseURL:   srv.URL + "/coding",

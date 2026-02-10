@@ -177,7 +177,7 @@ func RunWithConfig(ctx context.Context, dotSource []byte, cfg *RunConfigFile, ov
 		_ = writePreflightReport(opts.LogsRoot, report)
 		return nil, err
 	}
-	if _, err := runProviderCLIPreflight(ctx, g, runtimes, cfg, opts); err != nil {
+	if _, err := runProviderCLIPreflight(ctx, g, runtimes, cfg, opts, catalog); err != nil {
 		return nil, err
 	}
 

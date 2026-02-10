@@ -75,7 +75,10 @@ func resolveProviderRuntimes(cfg *RunConfigFile) (map[string]ProviderRuntime, er
 		}
 		rt.APIHeadersMap = cloneStringMap(pc.API.Headers)
 		rt.ProfileFamily = rt.API.ProfileFamily
-		if len(pc.Failover) > 0 {
+		// Preserve explicit empty failover overrides:
+		// - failover: [] => no failover targets for this provider
+		// - failover omitted => inherit builtin failover policy
+		if pc.Failover != nil {
 			rt.Failover = providerspec.CanonicalizeProviderList(pc.Failover)
 		} else if len(builtin.Failover) > 0 {
 			rt.Failover = providerspec.CanonicalizeProviderList(builtin.Failover)
