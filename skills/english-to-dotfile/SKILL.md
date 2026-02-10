@@ -267,7 +267,8 @@ expand_spec [
 Expand into a detailed spec covering: [RELEVANT SECTIONS].
 Write the spec to .ai/spec.md.
 
-Write status.json: outcome=success"
+Write status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.
+Write status JSON: outcome=success"
 ]
 
 start -> expand_spec -> impl_setup
@@ -366,7 +367,7 @@ impl_X [
 verify_X [
     shape=box,
     class="verify",
-    prompt="Verify [UNIT]. Run: [BUILD_CMD] && [TEST_CMD]\nWrite results to .ai/verify_X.md.\nWrite status.json: outcome=success if all pass, outcome=fail with failure details otherwise."
+    prompt="Verify [UNIT]. Run: [BUILD_CMD] && [TEST_CMD]\nWrite results to .ai/verify_X.md.\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if all pass, outcome=fail with failure details otherwise."
 ]
 
 check_X [shape=diamond, label="X OK?"]
@@ -400,7 +401,7 @@ The skill's default impl→verify→check pattern uses binary `outcome=success`/
 ```
 analyze [
     shape=box,
-    prompt="Analyze the commit. If it's relevant to our Go codebase, use outcome=port. If it's Python-only or docs-only, use outcome=skip.\n\nWrite status.json: outcome=port or outcome=skip with reasoning."
+    prompt="Analyze the commit. If it's relevant to our Go codebase, use outcome=port. If it's Python-only or docs-only, use outcome=skip.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=port or outcome=skip with reasoning."
 ]
 
 analyze -> plan_port  [condition="outcome=port", label="port"]
@@ -428,6 +429,16 @@ Key elements:
 - A **fetch/check** node at the loop head that returns `outcome=done` when there's nothing left
 - `loop_restart=true` on the edge that loops back, so each iteration gets a fresh log directory
 - The loop body follows the same impl→verify pattern as linear pipelines
+
+Failure-edge restart policy:
+- Use `loop_restart=true` on failure edges only when the condition includes `context.failure_class=transient_infra`.
+- Always pair that restart edge with a non-restart deterministic fail edge, e.g. `context.failure_class!=transient_infra`.
+
+Example:
+```
+check_X -> impl_X [condition="outcome=fail && context.failure_class=transient_infra", loop_restart=true]
+check_X -> impl_X [condition="outcome=fail && context.failure_class!=transient_infra"]
+```
 
 ##### Fan-out / fan-in (parallel consensus)
 
@@ -501,7 +512,7 @@ Every prompt must be **self-contained**. The agent executing it has no memory of
 2. **What to read**: "Read demo/dttf/dttf-v1.md section 1.4 and pkg/dttf/types.go"
 3. **What to write**: "Create pkg/dttf/loader.go with the LoadGlyphs function"
 4. **Acceptance criteria**: "Run `go build ./cmd/dttf ./pkg/dttf/...` and `go test ./cmd/dttf/... ./pkg/dttf/...` — both must pass"
-5. **Outcome instructions**: "Write status.json: outcome=success if all pass, outcome=fail with failure_reason"
+5. **Outcome instructions**: "Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path), fallback to `$KILROY_STAGE_STATUS_FALLBACK_PATH`, avoid nested status.json files, and set outcome=success/fail with failure_reason as appropriate"
 
 Validation scope policy:
 - Required checks must be scoped to the project/module paths created by the pipeline (for Go, prefer `./cmd/<app>` + `./pkg/<app>/...`).
@@ -514,6 +525,15 @@ Validation scope policy:
 - Build and test commands may run project-wide (failures in changed code are real problems).
 - If no files match the lint filter, skip lint and report success.
 - Repo-wide network-dependent checks are advisory. If attempted and blocked by DNS/proxy/network policy, record them as skipped in `.ai/` output and continue based on scoped required checks.
+
+#### Mandatory status-file contract
+
+Every codergen prompt MUST explicitly instruct the agent to write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path).
+
+Required wording (or equivalent):
+- "Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path)."
+- "If that path is unavailable, use `$KILROY_STAGE_STATUS_FALLBACK_PATH`."
+- "Do not write status.json inside nested module directories after `cd`."
 
 Implementation prompt template:
 ```
@@ -531,7 +551,8 @@ Acceptance:
 - `[BUILD_COMMAND]` must pass
 - `[TEST_COMMAND]` must pass
 
-Write status.json: outcome=success if all criteria pass, outcome=fail with failure_reason otherwise.
+Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path). If unavailable, use `$KILROY_STAGE_STATUS_FALLBACK_PATH`. Do not write status.json in nested module directories after `cd`.
+Write status JSON: outcome=success if all criteria pass, outcome=fail with failure_reason otherwise.
 ```
 
 Verification prompt template:
@@ -549,7 +570,8 @@ Run:
 IMPORTANT: Pre-existing lint errors in unrelated files must not block this feature.
 
 Write results to .ai/verify_[NODE_ID].md.
-Write status.json: outcome=success if ALL pass, outcome=fail with details.
+Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path). If unavailable, use `$KILROY_STAGE_STATUS_FALLBACK_PATH`. Do not write status.json in nested module directories after `cd`.
+Write status JSON: outcome=success if ALL pass, outcome=fail with details.
 ```
 
 Use language-appropriate commands: `go build`/`go test` for Go, `cargo build`/`cargo test` for Rust, `npm run build`/`npm test` for TypeScript, `pytest`/`mypy` for Python, etc.
@@ -571,7 +593,8 @@ Evaluate against these criteria:
 - [CRITERION_3]: if true, use outcome=[VALUE_3]
 
 Write your analysis to .ai/[ANALYSIS_FILE].md.
-Write status.json with the appropriate outcome value.
+Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path). If unavailable, use `$KILROY_STAGE_STATUS_FALLBACK_PATH`. Do not write status.json in nested module directories after `cd`.
+Write status JSON with the appropriate outcome value.
 ```
 
 #### Prompt complexity scaling
@@ -713,7 +736,7 @@ Custom outcome values work: `outcome=port`, `outcome=skip`, `outcome=needs_fix`.
 20. **Missing toolchain readiness gates for non-default build dependencies.** If the deliverable needs tools that are often absent (for example `wasm-pack`, Playwright browsers, mobile SDKs), add an early `shape=parallelogram` tool node that checks prerequisites and blocks the pipeline before expensive LLM stages.
 21. **Auto-install bootstrap without explicit user opt-in (interactive mode).** When tools are missing, do not silently add installer commands to run config. Ask the user first, then apply their choice.
 22. **Toolchain checks with no bootstrap path (when auto-install is intended).** If the run is expected to self-prepare the environment, companion run config must include idempotent `setup.commands` install/bootstrap steps. A check-only gate without setup bootstrap causes immediate hard failure.
-23. **Retrying long backward edges without restart.** When a retry edge jumps back to a much earlier implementation stage, set `loop_restart=true` on that edge so each retry starts with a fresh run directory and avoids stale-context loops.
+23. **Unguarded failure restarts.** Do NOT set `loop_restart=true` on generic `outcome=fail` edges. Guard restart edges with `context.failure_class=transient_infra` and add a companion deterministic edge without restart (`context.failure_class!=transient_infra`).
 24. **Local CXDB configs without launcher autostart.** In this repo, do not emit companion `run.yaml` that points at local CXDB endpoints but omits `cxdb.autostart` launcher wiring. That creates fragile manual setup and can silently attach to the wrong daemon.
 
 ## Notes on Reference Dotfile Conventions
@@ -749,18 +772,18 @@ digraph linkcheck {
 	    // Spec expansion (vague input — bootstraps .ai/spec.md into existence)
 	    expand_spec [
 	        shape=box, auto_status=true,
-	        prompt="Given the requirements: Build a Go CLI tool called linkcheck that takes a URL, crawls it, checks all links for HTTP status, reports broken ones. Supports robots.txt, configurable depth, JSON and text output.\n\nExpand into a detailed spec. Write to .ai/spec.md covering: CLI interface, packages, data types, error handling, test plan.\n\nWrite status.json: outcome=success"
+	        prompt="Given the requirements: Build a Go CLI tool called linkcheck that takes a URL, crawls it, checks all links for HTTP status, reports broken ones. Supports robots.txt, configurable depth, JSON and text output.\n\nExpand into a detailed spec. Write to .ai/spec.md covering: CLI interface, packages, data types, error handling, test plan.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
 	    ]
 
 	    // Project setup
 	    impl_setup [
 	        shape=box,
-	        prompt="Goal: $goal\n\nRead .ai/spec.md. Create Go project: go.mod, cmd/linkcheck/main.go stub, pkg/linkcheck/ directories.\n\nRun: go build ./cmd/linkcheck ./pkg/linkcheck/...\n\nWrite status.json: outcome=success if builds, outcome=fail otherwise."
+	        prompt="Goal: $goal\n\nRead .ai/spec.md. Create Go project: go.mod, cmd/linkcheck/main.go stub, pkg/linkcheck/ directories.\n\nRun: go build ./cmd/linkcheck ./pkg/linkcheck/...\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if builds, outcome=fail otherwise."
 	    ]
 
 	    verify_setup [
 	        shape=box, class="verify",
-	        prompt="Verify project setup.\n\nRun:\n1. go build ./cmd/linkcheck ./pkg/linkcheck/...\n2. Lint only changed files: git diff --name-only $base_sha -- '*.go' | xargs -r go vet (skip if no files match)\n3. Check go.mod and cmd/linkcheck exist\n4. Guardrail: `find . -name go.mod` should include only `./go.mod`\n\nIMPORTANT: Do NOT run project-wide lint. Only lint files changed by this feature.\n\nWrite results to .ai/verify_setup.md.\nWrite status.json: outcome=success if all pass, outcome=fail with details."
+	        prompt="Verify project setup.\n\nRun:\n1. go build ./cmd/linkcheck ./pkg/linkcheck/...\n2. Lint only changed files: git diff --name-only $base_sha -- '*.go' | xargs -r go vet (skip if no files match)\n3. Check go.mod and cmd/linkcheck exist\n4. Guardrail: `find . -name go.mod` should include only `./go.mod`\n\nIMPORTANT: Do NOT run project-wide lint. Only lint files changed by this feature.\n\nWrite results to .ai/verify_setup.md.\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if all pass, outcome=fail with details."
 	    ]
 
     check_setup [shape=diamond, label="Setup OK?"]
@@ -768,12 +791,12 @@ digraph linkcheck {
 	    // Core implementation
 	    impl_core [
 	        shape=box, class="hard", max_retries=2,
-	        prompt="Goal: $goal\n\nRead .ai/spec.md. Implement: URL crawling, link extraction, HTTP checking, robots.txt parser, output formatters (text + JSON). Create tests.\n\nRun: go test ./cmd/linkcheck/... ./pkg/linkcheck/...\n\nWrite status.json: outcome=success if tests pass, outcome=fail otherwise."
+	        prompt="Goal: $goal\n\nRead .ai/spec.md. Implement: URL crawling, link extraction, HTTP checking, robots.txt parser, output formatters (text + JSON). Create tests.\n\nRun: go test ./cmd/linkcheck/... ./pkg/linkcheck/...\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if tests pass, outcome=fail otherwise."
 	    ]
 
 	    verify_core [
 	        shape=box, class="verify",
-	        prompt="Verify core implementation.\n\nRun:\n1. go build ./cmd/linkcheck ./pkg/linkcheck/...\n2. Lint only changed files: git diff --name-only $base_sha -- '*.go' | xargs -r go vet (skip if no files match)\n3. go test ./cmd/linkcheck/... ./pkg/linkcheck/... -v\n\nIMPORTANT: Do NOT run project-wide lint. Only lint files changed by this feature.\n\nWrite results to .ai/verify_core.md.\nWrite status.json: outcome=success if all pass, outcome=fail with details."
+	        prompt="Verify core implementation.\n\nRun:\n1. go build ./cmd/linkcheck ./pkg/linkcheck/...\n2. Lint only changed files: git diff --name-only $base_sha -- '*.go' | xargs -r go vet (skip if no files match)\n3. go test ./cmd/linkcheck/... ./pkg/linkcheck/... -v\n\nIMPORTANT: Do NOT run project-wide lint. Only lint files changed by this feature.\n\nWrite results to .ai/verify_core.md.\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if all pass, outcome=fail with details."
 	    ]
 
     check_core [shape=diamond, label="Core OK?"]
@@ -781,7 +804,7 @@ digraph linkcheck {
 	    // Review
 	    review [
 	        shape=box, class="review", goal_gate=true,
-	        prompt="Goal: $goal\n\nRead .ai/spec.md. Review the full implementation against the spec. Check: all features implemented, tests pass, CLI works, error handling correct.\n\nSandboxed validation policy:\n- Required checks are scoped to `cmd/linkcheck` and `pkg/linkcheck`.\n- Repo-wide network-dependent checks are advisory only.\n\nRun: go build ./cmd/linkcheck ./pkg/linkcheck/... && go test ./cmd/linkcheck/... ./pkg/linkcheck/...\n\nWrite review to .ai/final_review.md.\nWrite status.json: outcome=success if complete, outcome=fail with what's missing."
+	        prompt="Goal: $goal\n\nRead .ai/spec.md. Review the full implementation against the spec. Check: all features implemented, tests pass, CLI works, error handling correct.\n\nSandboxed validation policy:\n- Required checks are scoped to `cmd/linkcheck` and `pkg/linkcheck`.\n- Repo-wide network-dependent checks are advisory only.\n\nRun: go build ./cmd/linkcheck ./pkg/linkcheck/... && go test ./cmd/linkcheck/... ./pkg/linkcheck/...\n\nWrite review to .ai/final_review.md.\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if complete, outcome=fail with what's missing."
 	    ]
 
     check_review [shape=diamond, label="Review OK?"]
