@@ -193,10 +193,17 @@ modeldb:
 
 # Deprecated compatibility aliases (`litellm_catalog_*`) are accepted for one release.
 
+setup:
+  commands:                      # optional; shell commands to run in the worktree before the first node
+    - npm install
+    - npx playwright install
+  timeout_ms: 600000             # optional; total timeout for all setup commands (default: 300000 = 5 min)
+
 git:
   require_clean: true
   run_branch_prefix: attractor/run
   commit_per_node: true
+  push_remote: origin            # optional; push run branch to this remote on loop_restart and terminal outcome
 ```
 
 ### 4.4 Exit Codes

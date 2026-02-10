@@ -268,6 +268,12 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 		return nil, err
 	}
 
+	// Re-run setup commands (e.g., npm install) since the recreated worktree
+	// loses untracked artifacts produced by the original setup.
+	if err := eng.executeSetupCommands(ctx); err != nil {
+		return nil, fmt.Errorf("resume setup commands failed: %w", err)
+	}
+
 	// Determine next node to execute by re-evaluating routing from the last completed node.
 	lastNodeID := strings.TrimSpace(cp.CurrentNode)
 	if lastNodeID == "" {
