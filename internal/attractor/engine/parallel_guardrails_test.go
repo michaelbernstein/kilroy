@@ -34,3 +34,17 @@ func TestParallelHandler_FailsFastOnEmptyRunBranchPrefix(t *testing.T) {
 		t.Fatalf("error = %q, want run_branch_prefix guardrail", res.Error)
 	}
 }
+
+func TestRunSubgraphUntil_ContextCanceled_StopsBeforeNextNode(t *testing.T) {
+	got := runCanceledSubgraphFixture(t)
+	if got.scheduledAfterCancel {
+		t.Fatalf("scheduled node %q after cancellation", got.nextNode)
+	}
+}
+
+func TestParallelCancelPrecedence_IgnorePolicyDoesNotScheduleNewWork(t *testing.T) {
+	got := runParallelCancelFixture(t, "ignore")
+	if got.startedNodesAfterCancel > 0 {
+		t.Fatalf("started %d nodes after cancel", got.startedNodesAfterCancel)
+	}
+}

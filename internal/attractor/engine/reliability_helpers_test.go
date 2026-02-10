@@ -244,9 +244,13 @@ func runCanceledSubgraphFixtureWithLogs(t *testing.T) (canceledSubgraphFixtureRe
 	dot := []byte(`
 digraph G {
   graph [goal="subgraph cancel fixture"]
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
   a [shape=diamond, type="cancel_fixture"]
   b [shape=parallelogram, tool_command="echo after-cancel > after_cancel.txt"]
+  start -> a
   a -> b [condition="outcome=fail"]
+  b -> exit [condition="outcome=success"]
 }
 `)
 	eng := newReliabilityFixtureEngine(t, repo, logsRoot, "subgraph-cancel-fixture", dot)
@@ -295,10 +299,15 @@ func runDeterministicSubgraphCycleFixtureWithLogs(t *testing.T, limit int) (stri
 	dot := []byte(`
 digraph G {
   graph [goal="subgraph cycle fixture", loop_restart_signature_limit="` + strconv.Itoa(limit) + `"]
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
   a [shape=diamond, type="det_cycle_fixture"]
   b [shape=diamond, type="det_cycle_fixture"]
+  start -> a
   a -> b [condition="outcome=fail"]
   b -> a [condition="outcome=fail"]
+  a -> exit [condition="outcome=success"]
+  b -> exit [condition="outcome=success"]
 }
 `)
 	eng := newReliabilityFixtureEngine(t, repo, logsRoot, "subgraph-cycle-fixture", dot)

@@ -29,6 +29,15 @@ func runSubgraphUntil(ctx context.Context, eng *Engine, startNodeID, stopNodeID 
 	var lastOutcome runtime.Outcome
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return parallelBranchResult{
+				HeadSHA:    headSHA,
+				LastNodeID: lastNode,
+				Outcome:    lastOutcome,
+				Completed:  completed,
+			}, err
+		}
+
 		if strings.TrimSpace(stopNodeID) != "" && current == stopNodeID {
 			return parallelBranchResult{
 				HeadSHA:    headSHA,
@@ -49,6 +58,14 @@ func runSubgraphUntil(ctx context.Context, eng *Engine, startNodeID, stopNodeID 
 			return parallelBranchResult{}, err
 		}
 		eng.cxdbStageFinished(ctx, node, out)
+		if err := ctx.Err(); err != nil {
+			return parallelBranchResult{
+				HeadSHA:    headSHA,
+				LastNodeID: lastNode,
+				Outcome:    out,
+				Completed:  completed,
+			}, err
+		}
 
 		// Record completion.
 		completed = append(completed, node.ID)
@@ -66,6 +83,14 @@ func runSubgraphUntil(ctx context.Context, eng *Engine, startNodeID, stopNodeID 
 		headSHA = sha
 		lastNode = node.ID
 		lastOutcome = out
+		if err := ctx.Err(); err != nil {
+			return parallelBranchResult{
+				HeadSHA:    headSHA,
+				LastNodeID: lastNode,
+				Outcome:    lastOutcome,
+				Completed:  completed,
+			}, err
+		}
 
 		next, err := selectNextEdge(eng.Graph, node.ID, out, eng.Context)
 		if err != nil {
@@ -89,6 +114,14 @@ func runSubgraphUntil(ctx context.Context, eng *Engine, startNodeID, stopNodeID 
 		}
 		if strings.EqualFold(next.Attr("loop_restart", "false"), "true") {
 			return parallelBranchResult{}, fmt.Errorf("loop_restart not supported in v1")
+		}
+		if err := ctx.Err(); err != nil {
+			return parallelBranchResult{
+				HeadSHA:    headSHA,
+				LastNodeID: lastNode,
+				Outcome:    lastOutcome,
+				Completed:  completed,
+			}, err
 		}
 		current = next.To
 	}
