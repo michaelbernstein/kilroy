@@ -208,9 +208,6 @@ func verifyAttractorRunPID(pid int, logsRoot string, runID string) (verifiedProc
 		return captureVerifiedProcess(pid)
 	}
 	if hasRunID {
-		if expectedRunID != "" && strings.TrimSpace(pidRunID) != expectedRunID {
-			return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: --run-id mismatch (pid=%q expected=%q)", pid, pidRunID, expectedRunID)
-		}
 		return captureVerifiedProcess(pid)
 	}
 	return verifiedProcess{}, fmt.Errorf("refusing to signal pid %d: process command line has no --logs-root/--run-id", pid)

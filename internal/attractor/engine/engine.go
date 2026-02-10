@@ -865,7 +865,7 @@ func (e *Engine) executeWithRetry(ctx context.Context, node *model.Node, retries
 			"failure_reason": out.FailureReason,
 		})
 		if ctx.Err() != nil {
-			co := canceledOutcomeForRetry(out, ctx)
+			co := canceledOutcomeForRetry(ctx, out)
 			fo, _ := co.Canonicalize()
 			_ = writeJSON(filepath.Join(stageDir, "status.json"), fo)
 			return fo, nil
@@ -898,7 +898,7 @@ func (e *Engine) executeWithRetry(ctx context.Context, node *model.Node, retries
 				"max_retry": maxRetries,
 			})
 			if !sleepWithContext(ctx, delay) {
-				co := canceledOutcomeForRetry(out, ctx)
+				co := canceledOutcomeForRetry(ctx, out)
 				fo, _ := co.Canonicalize()
 				_ = writeJSON(filepath.Join(stageDir, "status.json"), fo)
 				return fo, nil
@@ -953,7 +953,7 @@ func sleepWithContext(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
-func canceledOutcomeForRetry(out runtime.Outcome, ctx context.Context) runtime.Outcome {
+func canceledOutcomeForRetry(ctx context.Context, out runtime.Outcome) runtime.Outcome {
 	out.Status = runtime.StatusFail
 	if reason := strings.TrimSpace(out.FailureReason); reason != "" {
 		out.FailureReason = reason

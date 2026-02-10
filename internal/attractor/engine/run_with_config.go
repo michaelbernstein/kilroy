@@ -63,9 +63,9 @@ func RunWithConfig(ctx context.Context, dotSource []byte, cfg *RunConfigFile, ov
 	opts := RunOptions{
 		RepoPath:        cfg.Repo.Path,
 		RunBranchPrefix: cfg.Git.RunBranchPrefix,
-		StageTimeout:    durationFromOptionalMS(cfg.RuntimePolicy.StageTimeoutMS),
-		StallTimeout:    durationFromOptionalMS(cfg.RuntimePolicy.StallTimeoutMS),
-		StallCheckInterval: durationFromOptionalMS(
+		StageTimeout:    durationFromOptionalMSOrDisabled(cfg.RuntimePolicy.StageTimeoutMS),
+		StallTimeout:    durationFromOptionalMSOrDisabled(cfg.RuntimePolicy.StallTimeoutMS),
+		StallCheckInterval: durationFromOptionalMSOrDisabled(
 			cfg.RuntimePolicy.StallCheckIntervalMS,
 		),
 		MaxLLMRetries: copyOptionalInt(cfg.RuntimePolicy.MaxLLMRetries),
@@ -282,7 +282,7 @@ func modelIDForNode(n *model.Node) string {
 	return modelID
 }
 
-func durationFromOptionalMS(ms *int) time.Duration {
+func durationFromOptionalMSOrDisabled(ms *int) time.Duration {
 	if ms == nil {
 		return 0
 	}
