@@ -38,6 +38,9 @@ This revision explicitly addresses each fresh-eyes finding:
 - Add `RunOptions` runtime fields in the same task where config mapping is introduced.
 - Define global-stage-timeout vs node-timeout semantics explicitly (effective timeout is the minimum positive timeout).
 - Confirm `shape=parallelogram` + `tool_command` is already a supported execution path and keep timeout tests on that supported path.
+- Define `TestRun_StallWatchdog` explicitly in Task 5 Step 1 (not only in verification commands).
+- Specify synchronization for `lastProgressAt` between `appendProgress` and watchdog reads (single mutex or atomic path used consistently).
+- Clarify retry-cap override placement inside `attractorLLMRetryPolicy` (after default assignment, before return).
 - Include missing preflight helper definitions (`configuredAPIPromptProbeTransports`, policy-from-config resolver) directly in implementation steps.
 - Remove undefined `boolPtr` dependency from tests.
 - Make shell check scripts portable (`rg` when present, otherwise `grep`).
@@ -453,12 +456,34 @@ func TestRun_GlobalAndNodeTimeout_UsesSmallerTimeout(t *testing.T) {
 		t.Fatal("expected timeout from node/global min timeout")
 	}
 }
+
+func TestRun_StallWatchdog(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("requires sleep binary")
+	}
+	dot := []byte(`digraph G {
+  start [shape=Mdiamond]
+  wait [shape=parallelogram, tool_command="sleep 2"]
+  exit [shape=Msquare]
+  start -> wait -> exit
+}`)
+	repo := initTestRepo(t)
+	opts := RunOptions{
+		RepoPath:            repo,
+		StallTimeout:        150 * time.Millisecond,
+		StallCheckInterval:  25 * time.Millisecond,
+	}
+	_, err := Run(context.Background(), dot, opts)
+	if err == nil {
+		t.Fatal("expected stall watchdog timeout")
+	}
+}
 ```
 
 **Step 2: Run tests to verify failure**
 
-Run: `go test ./internal/attractor/engine -run 'TestRun_GlobalStageTimeoutCapsToolNode|TestRun_GlobalAndNodeTimeout_UsesSmallerTimeout' -v`
-Expected: FAIL (global stage timeout not wired yet).
+Run: `go test ./internal/attractor/engine -run 'TestRun_GlobalStageTimeoutCapsToolNode|TestRun_GlobalAndNodeTimeout_UsesSmallerTimeout|TestRun_StallWatchdog' -v`
+Expected: FAIL (global stage timeout and stall watchdog not wired yet).
 
 **Step 3: Implement guardrails**
 
@@ -470,15 +495,22 @@ Implementation details:
 - Stall watchdog:
   - Track `lastProgressAt` timestamp in engine state.
   - Update timestamp on every `appendProgress` call.
+  - Synchronize reads/writes for `lastProgressAt` using a single strategy (recommended: guard with `progressMu`, the same lock already used by `appendProgress`).
+  - Add a helper such as `lastProgressTime()` that reads under the same synchronization path used for writes.
   - In `run()`, derive a cancelable context (`context.WithCancelCause`) and start watchdog when `StallTimeout > 0`.
   - Watchdog checks at `StallCheckInterval`; if no progress for `StallTimeout`, append `stall_watchdog_timeout` progress event and cancel run with cause.
 - LLM retry cap:
   - `attractorLLMRetryPolicy` uses `RunOptions.MaxLLMRetries` (including explicit `0`), with default resolved in Task 4.
   - In non-config call paths, `applyDefaults` must populate `RunOptions.MaxLLMRetries` when nil before policy wiring reads it.
+  - Keep the existing default policy assignment first, then override `p.MaxRetries` from `RunOptions.MaxLLMRetries` immediately before returning `p`.
 
 Example retry-cap wiring:
 
 ```go
+// Keep current default assignment first.
+p.MaxRetries = 6
+
+// Override from RunOptions when explicitly configured.
 if execCtx != nil && execCtx.Engine != nil && execCtx.Engine.Options.MaxLLMRetries != nil {
 	p.MaxRetries = *execCtx.Engine.Options.MaxLLMRetries
 }
@@ -596,14 +628,14 @@ git commit -m "feat(preflight): add config-first prompt probe policy and transpo
 set -euo pipefail
 SKILL="skills/using-kilroy/SKILL.md"
 if command -v rg >/dev/null 2>&1; then
-  FIND='rg -n'
+  FIND=(rg -n)
 else
-  FIND='grep -n'
+  FIND=(grep -n)
 fi
-$FIND "attractor status --logs-root" "$SKILL"
-$FIND "attractor stop --logs-root" "$SKILL"
-$FIND "runtime_policy" "$SKILL"
-$FIND "preflight.prompt_probes" "$SKILL"
+"${FIND[@]}" "attractor status --logs-root" "$SKILL"
+"${FIND[@]}" "attractor stop --logs-root" "$SKILL"
+"${FIND[@]}" "runtime_policy" "$SKILL"
+"${FIND[@]}" "preflight.prompt_probes" "$SKILL"
 ```
 
 **Step 2: Run check to verify failure**
@@ -649,17 +681,17 @@ git commit -m "docs(skill): add status/stop and config-first reliability workflo
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v rg >/dev/null 2>&1; then
-  FIND='rg -n'
+  FIND=(rg -n)
 else
-  FIND='grep -n'
+  FIND=(grep -n)
 fi
-$FIND "attractor status --logs-root" README.md docs/strongdm/attractor/README.md docs/strongdm/attractor/reliability-troubleshooting.md
-$FIND "attractor stop --logs-root" README.md docs/strongdm/attractor/reliability-troubleshooting.md
-$FIND "runtime_policy:" README.md demo/rogue/run.yaml
-$FIND "preflight:" README.md demo/rogue/run.yaml
+"${FIND[@]}" "attractor status --logs-root" README.md docs/strongdm/attractor/README.md docs/strongdm/attractor/reliability-troubleshooting.md
+"${FIND[@]}" "attractor stop --logs-root" README.md docs/strongdm/attractor/reliability-troubleshooting.md
+"${FIND[@]}" "runtime_policy:" README.md demo/rogue/run.yaml
+"${FIND[@]}" "preflight:" README.md demo/rogue/run.yaml
 if [[ -f demo/dttf/run.yaml ]]; then
-  $FIND "runtime_policy:" demo/dttf/run.yaml
-  $FIND "preflight:" demo/dttf/run.yaml
+  "${FIND[@]}" "runtime_policy:" demo/dttf/run.yaml
+  "${FIND[@]}" "preflight:" demo/dttf/run.yaml
 fi
 ```
 
