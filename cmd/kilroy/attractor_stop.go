@@ -129,6 +129,11 @@ func runAttractorStop(args []string, stdout io.Writer, stderr io.Writer) int {
 		// Give SIGKILL at least one second to be observed by wait/poll loops.
 		forceWait = time.Second
 	}
+	if forceWait > 10*time.Second {
+		// SIGKILL should terminate quickly; avoid waiting an operator-specified
+		// long grace window after we've already forced termination.
+		forceWait = 10 * time.Second
+	}
 	if !waitForPIDExit(verified, forceWait) {
 		fmt.Fprintf(stderr, "pid %d did not exit after SIGKILL\n", verified.PID)
 		return 1
@@ -221,6 +226,8 @@ func resolveExpectedRunID(snapshotRunID string, logsRoot string) string {
 	if expected != "" {
 		return expected
 	}
+	// Early-stage runs can have run.pid before manifest/live artifacts are
+	// populated. Best-effort fallback to manifest run_id when available.
 	manifestRunID, err := readManifestRunID(logsRoot)
 	if err != nil {
 		return ""
