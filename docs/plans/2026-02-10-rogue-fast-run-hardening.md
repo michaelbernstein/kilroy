@@ -426,3 +426,21 @@ Run one fresh rogue-fast execution and verify artifacts:
 - expected failover chain exactly matches `demo/rogue/run.yaml`
 - toolchain failures surface in the first gate node, not late integration
 
+---
+
+## Execution Results (2026-02-10)
+
+Implemented and validated Tasks 4-8 in this worktree with full package tests:
+
+- `go test ./internal/agent -count=1` -> pass
+- `go test ./internal/attractor/engine -count=1` -> pass
+- `dot -Tsvg demo/rogue/rogue_fast.dot -o /dev/null` -> pass
+- `go run ./cmd/kilroy attractor validate --graph demo/rogue/rogue_fast.dot` -> pass
+
+Validation report:
+
+- `docs/plans/2026-02-10-rogue-fast-run-hardening-validation.md`
+
+Fresh production run status:
+
+- Not executed in this turn (pending explicit exact production command approval).
