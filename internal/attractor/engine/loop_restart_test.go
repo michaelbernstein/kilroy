@@ -577,3 +577,205 @@ type countingBackend struct {
 func (b *countingBackend) Run(ctx context.Context, exec *Execution, node *model.Node, prompt string) (string, *runtime.Outcome, error) {
 	return b.fn(ctx, exec, node, prompt)
 }
+
+func TestLoopRestart_PersistsContextKeys(t *testing.T) {
+	repo := t.TempDir()
+	runCmd(t, repo, "git", "init")
+	runCmd(t, repo, "git", "config", "user.name", "tester")
+	runCmd(t, repo, "git", "config", "user.email", "tester@example.com")
+	_ = os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644)
+	runCmd(t, repo, "git", "add", "-A")
+	runCmd(t, repo, "git", "commit", "-m", "init")
+
+	// Graph with loop_restart_persist_keys that preserves "completed_features"
+	// across restarts. The "work" node sets completed_features in context on
+	// each iteration. After a restart, the value should carry over.
+	dot := []byte(`
+digraph G {
+  graph [goal="test context persistence", loop_restart_persist_keys="completed_features,skipped_features"]
+  start [shape=Mdiamond]
+  exit  [shape=Msquare]
+  work  [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="do work"]
+  check [shape=diamond]
+  start -> work
+  work -> check
+  check -> exit [condition="outcome=success"]
+  check -> work [condition="outcome=fail", loop_restart=true]
+}
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var callCount atomic.Int32
+	var observedCompletedFeatures string
+	var observedIterationCount any
+	backend := &countingBackend{
+		fn: func(ctx context.Context, exec *Execution, node *model.Node, prompt string) (string, *runtime.Outcome, error) {
+			if node.ID != "work" {
+				return "ok", &runtime.Outcome{Status: runtime.StatusSuccess}, nil
+			}
+			n := callCount.Add(1)
+			if n == 1 {
+				// First iteration: set completed_features and fail to trigger restart.
+				return "fail", &runtime.Outcome{
+					Status:        runtime.StatusFail,
+					FailureReason: "temporary network error: connection reset",
+					ContextUpdates: map[string]any{
+						"completed_features": "feature-1",
+						"ephemeral_state":    "should-not-persist",
+					},
+				}, nil
+			}
+			// Second iteration: check if completed_features persisted.
+			observedCompletedFeatures = exec.Context.GetString("completed_features", "")
+			observedIterationCount, _ = exec.Context.Get("loop_restart.iteration_count")
+			return "ok", &runtime.Outcome{Status: runtime.StatusSuccess}, nil
+		},
+	}
+
+	g, _, err := Prepare(dot)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	logsRoot := t.TempDir()
+	eng := &Engine{
+		Graph:           g,
+		Options:         RunOptions{RepoPath: repo, RunID: "test-persist", LogsRoot: logsRoot, WorktreeDir: filepath.Join(logsRoot, "worktree"), RunBranchPrefix: "attractor/run", RequireClean: true},
+		DotSource:       dot,
+		LogsRoot:        logsRoot,
+		WorktreeDir:     filepath.Join(logsRoot, "worktree"),
+		Context:         runtime.NewContext(),
+		Registry:        NewDefaultRegistry(),
+		Interviewer:     &AutoApproveInterviewer{},
+		CodergenBackend: backend,
+	}
+	eng.RunBranch = "attractor/run/test-persist"
+
+	res, err := eng.run(ctx)
+	if err != nil {
+		t.Fatalf("run() error: %v", err)
+	}
+	if res.FinalStatus != runtime.FinalSuccess {
+		t.Fatalf("FinalStatus = %v, want success", res.FinalStatus)
+	}
+
+	// Verify completed_features persisted across the loop_restart.
+	if observedCompletedFeatures != "feature-1" {
+		t.Errorf("completed_features = %q, want %q (should persist across restart)", observedCompletedFeatures, "feature-1")
+	}
+
+	// Verify ephemeral_state did NOT persist (not in persist_keys).
+	if v := eng.Context.GetString("ephemeral_state", ""); v != "" {
+		t.Errorf("ephemeral_state = %q, want empty (should not persist)", v)
+	}
+
+	// Verify loop_restart.iteration_count was injected.
+	if observedIterationCount == nil {
+		t.Error("loop_restart.iteration_count not found in context after restart")
+	} else if count, ok := observedIterationCount.(int); !ok || count != 1 {
+		t.Errorf("loop_restart.iteration_count = %v, want 1", observedIterationCount)
+	}
+
+	// Verify loop_restart.from_node was injected.
+	fromNode := eng.Context.GetString("loop_restart.from_node", "")
+	if fromNode != "check" {
+		t.Errorf("loop_restart.from_node = %q, want %q", fromNode, "check")
+	}
+}
+
+func TestLoopRestart_PersistKeysProgressEvent(t *testing.T) {
+	repo := t.TempDir()
+	runCmd(t, repo, "git", "init")
+	runCmd(t, repo, "git", "config", "user.name", "tester")
+	runCmd(t, repo, "git", "config", "user.email", "tester@example.com")
+	_ = os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644)
+	runCmd(t, repo, "git", "add", "-A")
+	runCmd(t, repo, "git", "commit", "-m", "init")
+
+	dot := []byte(`
+digraph G {
+  graph [goal="test persist keys in progress", loop_restart_persist_keys="my_key"]
+  start [shape=Mdiamond]
+  exit  [shape=Msquare]
+  work  [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="do work"]
+  check [shape=diamond]
+  start -> work
+  work -> check
+  check -> exit [condition="outcome=success"]
+  check -> work [condition="outcome=fail", loop_restart=true]
+}
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var callCount atomic.Int32
+	backend := &countingBackend{
+		fn: func(ctx context.Context, exec *Execution, node *model.Node, prompt string) (string, *runtime.Outcome, error) {
+			if node.ID != "work" {
+				return "ok", &runtime.Outcome{Status: runtime.StatusSuccess}, nil
+			}
+			n := callCount.Add(1)
+			if n == 1 {
+				return "fail", &runtime.Outcome{Status: runtime.StatusFail, FailureReason: "temporary error: dial tcp timeout"}, nil
+			}
+			return "ok", &runtime.Outcome{Status: runtime.StatusSuccess}, nil
+		},
+	}
+
+	g, _, err := Prepare(dot)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	logsRoot := t.TempDir()
+	eng := &Engine{
+		Graph:           g,
+		Options:         RunOptions{RepoPath: repo, RunID: "test-persist-progress", LogsRoot: logsRoot, WorktreeDir: filepath.Join(logsRoot, "worktree"), RunBranchPrefix: "attractor/run", RequireClean: true},
+		DotSource:       dot,
+		LogsRoot:        logsRoot,
+		WorktreeDir:     filepath.Join(logsRoot, "worktree"),
+		Context:         runtime.NewContext(),
+		Registry:        NewDefaultRegistry(),
+		Interviewer:     &AutoApproveInterviewer{},
+		CodergenBackend: backend,
+	}
+	eng.RunBranch = "attractor/run/test-persist-progress"
+
+	_, err = eng.run(ctx)
+	if err != nil {
+		t.Fatalf("run() error: %v", err)
+	}
+
+	// Read the progress.ndjson from the base logs root and verify
+	// the loop_restart event includes the persist_keys field.
+	progressPath := filepath.Join(logsRoot, "progress.ndjson")
+	progressBytes, err := os.ReadFile(progressPath)
+	if err != nil {
+		t.Fatalf("read progress: %v", err)
+	}
+	found := false
+	for _, line := range strings.Split(string(progressBytes), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event["event"] == "loop_restart" {
+			if keys, ok := event["persist_keys"]; ok {
+				if arr, ok := keys.([]any); ok && len(arr) == 1 {
+					if arr[0] == "my_key" {
+						found = true
+						break
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("expected loop_restart progress event with persist_keys=[\"my_key\"]")
+	}
+}

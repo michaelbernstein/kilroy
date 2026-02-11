@@ -130,6 +130,26 @@ func restartFailureSignature(nodeID string, out runtime.Outcome, failureClass st
 	return strings.TrimSpace(nodeID) + "|" + normalizedFailureClassOrDefault(failureClass) + "|" + reason
 }
 
+// loopRestartPersistKeyNames returns the list of context keys configured to persist
+// across loop_restart iterations via the loop_restart_persist_keys graph attribute.
+func loopRestartPersistKeyNames(g *model.Graph) []string {
+	if g == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(g.Attrs["loop_restart_persist_keys"])
+	if raw == "" {
+		return nil
+	}
+	var keys []string
+	for _, key := range strings.Split(raw, ",") {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
 func normalizeFailureReason(reason string) string {
 	reason = strings.ToLower(strings.TrimSpace(reason))
 	if reason == "" {

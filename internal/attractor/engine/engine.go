@@ -697,12 +697,14 @@ func (e *Engine) loopRestart(ctx context.Context, targetNodeID string, fromNodeI
 		return nil, fmt.Errorf("loop_restart: create logs dir: %w", err)
 	}
 
+	persistKeyNames := loopRestartPersistKeyNames(e.Graph)
 	e.appendProgress(map[string]any{
 		"event":              "loop_restart",
 		"restart_count":      e.restartCount,
 		"target_node":        targetNodeID,
 		"new_logs_root":      newLogsRoot,
 		"retry_budget_reset": true,
+		"persist_keys":       persistKeyNames,
 	})
 
 	// Switch to fresh logs; worktree stays the same.
@@ -724,6 +726,12 @@ func (e *Engine) loopRestart(ctx context.Context, targetNodeID string, fromNodeI
 	// If the same deterministic failure persists after a restart, the counter should
 	// keep accumulating so the circuit breaker can still trip and prevent infinite loops.
 
+	// Snapshot context keys that should persist across loop restarts. This allows
+	// pipelines to accumulate state (e.g., completed feature lists, features to skip)
+	// that survives the context reset. Keys are specified via the graph-level
+	// loop_restart_persist_keys attribute (comma-separated).
+	persistedValues := e.snapshotPersistKeys()
+
 	// Reset context: start fresh with only graph-level attributes.
 	e.Context = runtime.NewContext()
 	for k, v := range e.Graph.Attrs {
@@ -732,6 +740,15 @@ func (e *Engine) loopRestart(ctx context.Context, targetNodeID string, fromNodeI
 	e.Context.Set("graph.goal", e.Graph.Attrs["goal"])
 	e.Context.Set("base_sha", e.baseSHA)
 
+	// Restore persisted context keys from the previous iteration.
+	for k, v := range persistedValues {
+		e.Context.Set(k, v)
+	}
+
+	// Inject loop restart metadata so pipelines can track iteration state.
+	e.Context.Set("loop_restart.iteration_count", e.restartCount)
+	e.Context.Set("loop_restart.from_node", fromNodeID)
+
 	// Reset fidelity state.
 	e.incomingEdge = nil
 	e.forceNextFidelity = ""
@@ -739,6 +756,33 @@ func (e *Engine) loopRestart(ctx context.Context, targetNodeID string, fromNodeI
 
 	// Fresh loop state: retries are per-iteration and intentionally reset on loop_restart.
 	return e.runLoop(ctx, targetNodeID, nil, map[string]int{}, map[string]runtime.Outcome{})
+}
+
+// snapshotPersistKeys extracts context values that should survive a loop_restart
+// context reset. Keys are specified via the graph-level loop_restart_persist_keys
+// attribute as a comma-separated list (e.g., "completed_features,skipped_features").
+func (e *Engine) snapshotPersistKeys() map[string]any {
+	if e == nil || e.Graph == nil || e.Context == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(e.Graph.Attrs["loop_restart_persist_keys"])
+	if raw == "" {
+		return nil
+	}
+	persisted := map[string]any{}
+	for _, key := range strings.Split(raw, ",") {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if v, ok := e.Context.Get(key); ok {
+			persisted[key] = v
+		}
+	}
+	if len(persisted) == 0 {
+		return nil
+	}
+	return persisted
 }
 
 func (e *Engine) executeNode(ctx context.Context, node *model.Node) (runtime.Outcome, error) {
