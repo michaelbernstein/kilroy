@@ -35,7 +35,7 @@ var builtinSpecs = map[string]Spec{
 			InvocationTemplate: []string{"-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose", "--model", "{{model}}", "{{prompt}}"},
 			PromptMode:         "arg",
 			HelpProbeArgs:      []string{"--help"},
-			CapabilityAll:      []string{"--output-format", "stream-json", "--verbose"},
+			CapabilityAll:      []string{"--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"},
 		},
 		Failover: []string{"google"},
 	},

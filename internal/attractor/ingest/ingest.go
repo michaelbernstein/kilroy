@@ -28,11 +28,31 @@ type Result struct {
 	Warnings   []string // Any validation warnings.
 }
 
-func buildCLIArgs(opts Options) (string, []string) {
+// wrapPrompt wraps raw requirements in explicit programmatic-mode instructions
+// so Claude generates a DOT pipeline file instead of implementing the software.
+func wrapPrompt(requirements, repoPath string) string {
+	return fmt.Sprintf(`You are running in PROGRAMMATIC CLI INGEST MODE.
+
+Your task: generate a Graphviz .dot pipeline file for Kilroy's Attractor engine.
+You MUST follow the english-to-dotfile skill in your system prompt.
+
+CRITICAL RULES:
+- You are in programmatic mode (cannot ask questions). Default to Medium option.
+- Output ONLY the raw .dot digraph content. No markdown fences, no explanatory text.
+- DO NOT implement the software. DO NOT write code files. ONLY produce the .dot pipeline.
+- The output must start with "digraph" and end with the closing "}".
+- You may read files in the repository at %s to understand the project structure.
+- You may use curl/WebFetch to fetch the weather report and LiteLLM catalog as described in the skill.
+
+REQUIREMENTS:
+%s`, repoPath, requirements)
+}
+
+func buildCLIArgs(opts Options) (string, []string, string) {
 	exe := envOr("KILROY_CLAUDE_PATH", "claude")
 	maxTurns := opts.MaxTurns
 	if maxTurns <= 0 {
-		maxTurns = 3
+		maxTurns = 15
 	}
 
 	args := []string{
@@ -41,16 +61,31 @@ func buildCLIArgs(opts Options) (string, []string) {
 		"--model", opts.Model,
 		"--max-turns", fmt.Sprintf("%d", maxTurns),
 		"--dangerously-skip-permissions",
+		"--disallowedTools", "Write,Edit,NotebookEdit",
+	}
+
+	// Give Claude read access to the repo without running inside it.
+	if opts.RepoPath != "" {
+		args = append(args, "--add-dir", opts.RepoPath)
 	}
 
 	if opts.SkillPath != "" {
-		args = append(args, "--append-system-prompt-file", opts.SkillPath)
+		skillContent, err := os.ReadFile(opts.SkillPath)
+		if err == nil && len(skillContent) > 0 {
+			args = append(args, "--append-system-prompt", string(skillContent))
+		}
 	}
 
-	// The requirements are the prompt — appended last.
-	args = append(args, opts.Requirements)
+	// Create a temp working directory so Claude can't write into the repo.
+	tmpDir, err := os.MkdirTemp("", "kilroy-ingest-*")
+	if err != nil {
+		tmpDir = os.TempDir()
+	}
 
-	return exe, args
+	// The wrapped prompt is appended last.
+	args = append(args, wrapPrompt(opts.Requirements, opts.RepoPath))
+
+	return exe, args, tmpDir
 }
 
 // Run executes the ingestion: invokes Claude Code with the skill and requirements,
@@ -61,12 +96,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("skill file not found: %s: %w", opts.SkillPath, err)
 	}
 
-	exe, args := buildCLIArgs(opts)
+	exe, args, tmpDir := buildCLIArgs(opts)
+	defer os.RemoveAll(tmpDir)
 
 	cmd := exec.CommandContext(ctx, exe, args...)
-	if opts.RepoPath != "" {
-		cmd.Dir = opts.RepoPath
-	}
+	cmd.Dir = tmpDir
 	cmd.Stdin = strings.NewReader("")
 
 	var stdout, stderr bytes.Buffer
