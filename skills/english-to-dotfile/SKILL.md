@@ -23,6 +23,20 @@ When invoked programmatically (via CLI), output ONLY the raw `.dot` file content
 
 When invoked interactively (in conversation), you may include explanatory text.
 
+## Working Style
+
+Assume the planner is highly capable. Prefer compact guidance that explains *why* a pattern works, then let the planner adapt it to the repository.
+
+Use this document in two modes:
+- **Contract** (hard): only for parser/runtime interface requirements where deviation breaks execution.
+- **Heuristic** (soft): reliability/cost defaults learned from real runs; adapt when repo evidence suggests a better split.
+
+When guidance conflicts, optimize for:
+1. Correctness of the generated graph
+2. Recoverability and low replay cost on retries/resume
+3. Clear operator observability (diagnosable failures)
+4. Cost/latency efficiency
+
 ## Process
 
 ### Phase 0A: Repo Scan + Minimal Disambiguation (Ask 0 Questions If Possible)
@@ -241,7 +255,10 @@ Think in terms of **information flow**: each node should reduce one kind of unce
 
 Example pattern for “map the codebase”: shared frame -> boundary slices -> merge -> consistency check.
 
-#### Sizing Calibration (Required)
+#### Sizing Calibration (Advisory)
+
+Use these as reliability-oriented defaults, not rigid rules. When tradeoffs conflict, prefer the split that minimizes replay cost and keeps each node independently verifiable.
+Why advisory: this is an intelligent planner operating across heterogeneous repos and goals; rigid node-size rules can be counterproductive when the architecture naturally requires a different cut.
 
 Right-sized node characteristics:
 - One primary deliverable (one concrete thing to finish), not a bundle of loosely-related outcomes.
@@ -261,15 +278,40 @@ How to split oversized nodes:
 - Move cross-subsystem wiring into a dedicated integration node.
 - Keep verification nodes focused on one contract each (build/test + targeted checks).
 
+Practical signal from real runs:
+- If a single node prompt reads like a full project plan (many unrelated modules, many independent deliverables), convergence and replay cost both degrade.
+- Better reliability usually comes from "small, compileable slices" plus a late integration node than from one "port everything exactly" mega-node.
+
+#### Runtime Budget Heuristics (Advisory)
+
+- Prefer splitting oversized nodes before increasing `max_agent_turns`.
+- For long-running codergen work, a practical starting point is:
+  - stuck/no-progress threshold: ~5 minutes (when runtime supports stuck detection),
+  - total per-attempt budget: ~20 minutes,
+  - retries: 1 for deterministic heavy tasks (plus transient-infra restart guards on edges).
+- Treat these as starting defaults and adjust based on observed task shape and provider behavior.
+- Prefer fixing scope before adding budget: if a node needs much more than ~20 minutes repeatedly, that is usually a decomposition smell, not just a timeout problem.
+Why advisory: runtime, provider latency, and toolchain behavior vary widely; the model should tune budgets to real conditions instead of forcing a fixed template.
+
 #### Checkpoint Ergonomics (Information)
 
 - Resume uses the parent run checkpoint at `{logs_root}/checkpoint.json`.
 - In parallel fan-out, branch-local progress is not a parent resume point.
 - If a run is stopped mid-node or mid-fan-out, in-flight work since the last parent checkpoint may be replayed.
 
+#### Pre-Emit Reliability Pass (Advisory)
+
+Before finalizing the DOT, do a short reliability pass on the draft:
+- **Scope audit:** each impl node should have one primary deliverable and one dominant validation contract.
+- **Replay-cost audit:** a single node failure should not force replay of large completed sections; adjust decomposition and retry targets accordingly.
+- **Prompt realism audit:** prefer concrete file sets and acceptance checks over broad "implement everything in subsystem X" wording.
+- **Topology audit:** only use fan-out where branches can stay mostly write-isolated; otherwise keep the flow linear until boundaries are cleaner.
+
+This pass is intentionally lightweight; the goal is to catch avoidable structural risk before validators check syntax.
+
 ### Phase 3: Build the Graph
 
-#### Required structure
+#### Baseline structure
 
 ```
 digraph project_name {
@@ -277,8 +319,8 @@ digraph project_name {
         goal="One-sentence summary of what the software does",
         rankdir=LR,
         default_max_retry=3,
-        retry_target="<first implementation node>",
-        fallback_retry_target="<second implementation node>",
+        retry_target="<recovery node with low replay cost>",
+        fallback_retry_target="<secondary recovery node>",
         model_stylesheet="
             * { llm_model: DEFAULT_MODEL_ID; llm_provider: DEFAULT_PROVIDER; }
             .hard { llm_model: HARD_MODEL_ID; llm_provider: HARD_PROVIDER; }
@@ -293,6 +335,12 @@ digraph project_name {
     // ... implementation, verification, and routing nodes ...
 }
 ```
+
+Retry-target strategy (heuristic):
+- For small linear pipelines, early retry targets are usually fine.
+- For large pipelines with expensive early stages, prefer late-stage `retry_target` / `fallback_retry_target` choices (for example integration/polish nodes) to reduce replay after goal-gate failures.
+- Keep review-failure loops aligned with this strategy: repair late, not from bootstrap.
+Why: the best recovery point depends on graph topology and failure semantics; choose the least-destructive point for this specific pipeline.
 
 #### Provenance header
 
@@ -524,25 +572,25 @@ Each parallel worker writes its output to a uniquely-named `.ai/` file. The synt
 - Implementation planning (3 plans, 1 debate/consolidate)
 - Code review (3 reviewers, 1 consensus)
 
-#### Parallel write-scope discipline (Guideline + Requirement)
+#### Parallel write-scope discipline (Advisory)
 
 Guideline:
 - Partition fan-out branches by natural ownership boundaries (for example one package/subsystem per branch) so each branch can be validated independently.
 
-Requirement:
-- Every fan-out branch prompt MUST declare explicit write-scope paths.
-- Branch write scopes MUST be disjoint.
-- Shared/core files (for example registry/index/type hubs) are read-only during fan-out.
-- Shared/core edits happen in a dedicated post-fan-in integration node.
-- Each branch verify node MUST compare changed files vs `$base_sha` and fail with `failure_reason=write_scope_violation` if any changed path is outside the declared scope.
+- Strongly prefer explicit write-scope paths in each fan-out branch prompt.
+- Prefer disjoint branch write scopes; keep shared/core files read-only during fan-out.
+- Prefer shared/core edits in a dedicated post-fan-in integration node.
+- Prefer branch verify nodes to compare changed files vs `$base_sha` and report `failure_reason=write_scope_violation` when scope boundaries are crossed.
+Why advisory: some domains require intentional shared-file edits during fan-out; the model should prefer isolation by default, then deliberately justify any exceptions.
 
-#### Checkpoint Ergonomics (Requirements)
+#### Checkpoint Ergonomics (Advisory)
 
 - Prefer nodes that each produce one checkpoint-worthy artifact or decision.
 - Avoid long internal dependency chains inside a single node.
 - Avoid one giant fan-out wave for large systems; use staged fan-out waves.
 - After each fan-in, add a parent checkpoint barrier node (for example `verify_batch_N` or `consolidate_batch_N`) before launching the next fan-out.
 - Split broad implementation into multiple fan-out/fan-in phases so operators can stop/resume with minimal replay.
+Why advisory: operator priorities differ (speed vs. replay safety vs. cost), so checkpoint placement should be optimized for the run context rather than enforced mechanically.
 
 ##### Relaxed node patterns (2-node vs 3-node)
 
@@ -584,7 +632,7 @@ This pattern is mandatory because each node runs in a fresh agent session with n
 
 ### Phase 4: Write Prompts
 
-Every prompt must be **self-contained**. The agent executing it has no memory of prior nodes. Every prompt MUST include:
+Every prompt should be **self-contained**. Nodes run in fresh sessions, so downstream success depends on explicit inputs/outputs. Reliable prompts include five ingredients:
 
 1. **What to do**: "Implement the bitmap threshold conversion per section 1.4 of demo/dttf/dttf-v1.md"
 2. **What to read**: "Read demo/dttf/dttf-v1.md section 1.4 and pkg/dttf/types.go"
@@ -593,9 +641,9 @@ Every prompt must be **self-contained**. The agent executing it has no memory of
 5. **Outcome instructions**: "Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path), fallback to `$KILROY_STAGE_STATUS_FALLBACK_PATH`, avoid nested status.json files, and set outcome=success/fail with failure_reason + details as appropriate"
 
 Validation scope policy:
-- Required checks must be scoped to the project/module paths created by the pipeline (for Go, prefer `./cmd/<app>` + `./pkg/<app>/...`).
-- Do NOT default to repo-wide `./...` required checks in monorepos/sandboxed environments unless the user explicitly requests full-repo validation.
-- Lint commands in verify nodes MUST be scoped to files changed by the current feature, not the entire project. Pre-existing lint errors in unrelated files will cause infinite retry loops.
+- Scope required checks to the project/module paths created by the pipeline (for Go, prefer `./cmd/<app>` + `./pkg/<app>/...`).
+- Avoid defaulting to repo-wide `./...` required checks in monorepos/sandboxed environments unless the user explicitly asks for full-repo validation.
+- Scope verify-node lint to files changed by the feature, not the whole repo. This prevents infinite retry loops on unrelated pre-existing lint debt.
   - Use `$base_sha` (the commit SHA at run start, expanded by the engine) to identify changed files.
   - TypeScript/JS: `git diff --name-only $base_sha -- '*.ts' '*.tsx' '*.js' '*.jsx' | xargs -r npx eslint`
   - Go: scope to project paths (`./cmd/<app>/...`, `./pkg/<app>/...`), not `./...`
@@ -605,8 +653,8 @@ Validation scope policy:
 - Repo-wide network-dependent checks are advisory. If attempted and blocked by DNS/proxy/network policy, record them as skipped in `.ai/` output and continue based on scoped required checks.
 
 File integrity and formatting policy:
-- Guideline: Include a lightweight structural integrity check before broad tests so malformed files fail fast.
-- Requirement: Verify prompts MUST include syntax/parse/compile sanity and formatter checks scoped to changed files or the module under test.
+- Include a lightweight structural integrity check before broad tests so malformed files fail fast.
+- As a strong default, include syntax/parse/compile sanity and formatter checks scoped to changed files or the module under test.
   - Rust example: `cargo fmt --all -- --check` then scoped `cargo check`
   - Go example: `gofmt` check on changed `.go` files then scoped `go build`
   - TypeScript example: formatter check on changed files then scoped typecheck/build
@@ -614,27 +662,27 @@ File integrity and formatting policy:
 - On these failures, use stable classes like `failure_reason=format_invalid` or `failure_reason=parse_invalid` with concrete file/line details.
 
 Workspace artifact hygiene:
-- Guideline: Build/test artifacts are expected locally but should not be treated as feature output.
-- Requirement: Verify prompts MUST fail when feature diffs include artifact/output paths unless explicitly required by spec.
+- Build/test artifacts are expected locally but should not be treated as feature output.
+- As a strong default, fail verification when feature diffs include artifact/output paths unless explicitly required by spec.
 - Check changed files vs `$base_sha` and block paths such as `target/`, `dist/`, `build/`, `.pytest_cache/`, `node_modules/`, coverage outputs, temp files, or backup files.
 - Use `failure_reason=artifact_pollution` and list offending paths in `details`.
 
-#### Mandatory status-file contract
+#### Status-file contract (Hard Interface)
 
-Every codergen prompt MUST explicitly instruct the agent to write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path).
+Every codergen prompt must explicitly instruct the agent to write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path). This is an engine contract, not style preference.
 
 Required wording (or equivalent):
 - "Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path)."
 - "If that path is unavailable, use `$KILROY_STAGE_STATUS_FALLBACK_PATH`."
 - "Do not write status.json inside nested module directories after `cd`."
 
-#### Canonical failure-status contract (Guideline + Requirement)
+#### Canonical failure-status contract (Hard Interface)
 
-Guideline:
-- Keep failure payloads machine-stable and human-readable so retries/routing/diagnostics remain deterministic.
+Why:
+- Machine-stable, human-readable failure payloads keep retries/routing/diagnostics deterministic.
 
-Requirement:
-- For `outcome=fail` or `outcome=retry`, status JSON MUST include both:
+Contract:
+- For `outcome=fail` or `outcome=retry`, status JSON must include both:
   - `failure_reason` (short stable reason code)
   - `details` (human-readable explanation)
 - Do not emit non-canonical fail payloads like `{"outcome":"fail","gaps":[...]}` without `failure_reason`.
@@ -823,35 +871,31 @@ Custom outcome values work: `outcome=port`, `outcome=skip`, `outcome=needs_fix`.
 
 `success`, `partial_success`, `retry`, `fail`, `skipped`
 
-## Anti-Patterns
+## Common Failure Modes (And Better Defaults)
 
-1. **No verification after implementation (in build pipelines).** Every impl node that produces code MUST have a verify node after it. Never chain impl → impl → impl. Exception: analytical/triage nodes in non-build workflows may use the 2-node pattern (see "Relaxed node patterns" above).
-2. **Labels instead of conditions.** `[label="success"]` does NOT route. Use `[condition="outcome=success"]`.
-3. **All failures → exit.** Failure edges must loop back to the implementation node for retry, not to exit.
-4. **Multiple exit nodes.** Exactly one `shape=Msquare` node. Route failures through conditionals, not separate exits.
-5. **Prompts without outcome instructions.** Every prompt must tell the agent what to write in status.json.
-6. **Inlining the spec.** Reference the spec file by path. Don't copy it into prompt attributes. Exception: `expand_spec` node bootstraps the spec.
-7. **Missing graph attributes.** Always set `goal`, `model_stylesheet`, `default_max_retry`.
-8. **Wrong shapes.** Start must be `Mdiamond`. Exit must be `Msquare`. The validator also accepts nodes with id `start`/`exit` regardless of shape, but always use the canonical shapes.
-9. **Unnecessary timeouts.** Do NOT add timeouts to simple impl/verify nodes in linear pipelines — a single CLI run can legitimately take hours. DO add timeouts to nodes in looping pipelines (to prevent infinite hangs) or nodes calling external services. When adding timeouts, use generous values (`"900"` for normal work, `"1800"` for complex implementation, `"2400"` for integration).
-10. **Build files after implementation.** Project setup (module file, directory structure) must be the FIRST implementation node.
-11. **Catastrophic review rollback.** Review failure (`check_review -> impl_X`) must target a LATE node (integration, CLI, or the last major impl). Never loop `check_review` back to `impl_setup` — this throws away all work. Target the last integration or polish node.
-12. **Missing verify class.** Every verify node MUST have `class="verify"` so the model stylesheet applies your intended verify model and thinking.
-13. **Missing expand_spec for vague input.** If no spec file exists in the repo, the pipeline MUST include an `expand_spec` node. Without it, `impl_setup` references `.ai/spec.md` that doesn't exist in the fresh worktree.
-14. **Hardcoding language commands.** Use the correct build/test/lint commands for the project's language. Don't write `go build` for a Python project.
-15. **Missing file-based handoff.** Every node that produces output for downstream nodes must write it to a named `.ai/` file. Every node that consumes prior output must be told which files to read. Relying on context variables for large data (plans, reviews, logs) does not work — use the filesystem.
-16. **Binary-only outcomes in steering nodes.** If a workflow has more than two paths (e.g., process/skip/done), define custom outcome values in the prompt and route on them with conditions. Don't force everything into success/fail.
-17. **Unscoped Go monorepo checks.** Do NOT make repo-wide `go build ./...`, `go vet ./...`, or `go test ./...` required by default. Scope required checks to generated project paths (e.g., `./cmd/<app>`, `./pkg/<app>/...`). Treat blocked repo-wide network checks as advisory/skipped.
-18. **Unscoped lint in verify nodes.** Do NOT use `npm run lint`, `ruff check .`, or any project-wide lint command in verify nodes. Scope lint to changed files using `git diff --name-only $base_sha`. Pre-existing errors in unrelated files cause infinite retry loops where the agent burns tokens trying to fix code it didn't write.
-19. **Overly aggressive API preflight timeouts in run config.** When producing or updating a companion run config for real-provider runs, set `preflight.prompt_probes.timeout_ms: 60000` (60s) as the baseline to reduce startup failures from transient provider latency spikes.
-20. **Missing toolchain readiness gates for non-default build dependencies.** If the deliverable needs tools that are often absent (for example `wasm-pack`, Playwright browsers, mobile SDKs), add an early `shape=parallelogram` tool node that checks prerequisites and blocks the pipeline before expensive LLM stages.
-21. **Auto-install bootstrap without explicit user opt-in (interactive mode).** When tools are missing, do not silently add installer commands to run config. Ask the user first, then apply their choice.
-22. **Toolchain checks with no bootstrap path (when auto-install is intended).** If the run is expected to self-prepare the environment, companion run config must include idempotent `setup.commands` install/bootstrap steps. A check-only gate without setup bootstrap causes immediate hard failure.
-23. **Unguarded failure restarts.** Do NOT set `loop_restart=true` on generic `outcome=fail` edges. Guard restart edges with `context.failure_class=transient_infra` and add a companion deterministic edge without restart (`context.failure_class!=transient_infra`).
-24. **Local CXDB configs without launcher autostart.** In this repo, do not emit companion `run.yaml` that points at local CXDB endpoints but omits `cxdb.autostart` launcher wiring. That creates fragile manual setup and can silently attach to the wrong daemon.
-25. **Non-canonical fail payloads.** Do NOT emit `outcome=fail` or `outcome=retry` without both `failure_reason` and `details`.
-26. **Artifact pollution in feature diffs.** Do NOT allow build/cache/temp/backup artifacts in changed-file diffs unless explicitly required by the spec.
-27. **Overlapping fan-out write scopes.** Do NOT let parallel branches modify shared/core files; reserve shared edits for a dedicated post-fan-in integration node.
+These are recurring ways graphs fail in production. Use them as diagnostics and design hints, not rigid commandments.
+
+1. **No verification after code changes.** Build pipelines are more reliable when each impl node has a paired verify node before progressing.
+2. **Routing on labels instead of conditions.** `label="success"` is display-only; outcome routing comes from `condition="outcome=..."`.
+3. **Failure exits too early.** Sending fail edges to `exit` prevents recovery; local retry loops usually converge faster.
+4. **Rollback to bootstrap on late failures.** Review failures are usually cheapest to repair from a late integration/polish node.
+5. **Prompts omit explicit outcomes or status path contract.** This causes ambiguous routing and missing checkpoint metadata.
+6. **Spec text inlined everywhere.** Large inline specs bloat prompts and reduce reliability; reference spec paths, with `expand_spec` as the bootstrap exception.
+7. **Missing baseline graph contracts.** Omitting `goal`, `model_stylesheet`, retry defaults, or canonical start/exit shapes can break validation or behavior.
+8. **Timeout misuse.** Tight timeouts on heavy linear work cause false failures; use generous ceilings and pair with stuck detection + bounded retries.
+9. **Wrong validation scope.** Repo-wide required checks in monorepos often fail on unrelated debt; scope required checks to the feature/module.
+10. **Unscoped lint.** Whole-repo lint in verify nodes frequently causes infinite retries on unrelated files.
+11. **Wrong language commands.** Reliability drops when build/test/lint commands do not match the project stack.
+12. **Missing file-based handoff.** Nodes are stateless between sessions; `.ai/*` artifacts are the durable handoff surface.
+13. **Binary-only steering.** Multi-path workflows are clearer when prompts define custom outcome values (`skip`, `port`, `done`, etc.).
+14. **Unguarded loop restarts.** `loop_restart=true` works best when constrained to `context.failure_class=transient_infra`, with a deterministic non-restart fail edge alongside it.
+15. **Toolchain assumptions.** Early readiness gates prevent expensive graph runs from failing late on missing dependencies.
+16. **Implicit bootstrap mutation.** In interactive mode, auto-install in run config should be an explicit user choice.
+17. **Local CXDB without launcher wiring (this repo).** Local endpoints are more predictable with `cxdb.autostart` launcher defaults than manual daemon assumptions.
+18. **Non-canonical fail payloads.** Stable `failure_reason` + `details` keeps retries, diagnostics, and automation deterministic.
+19. **Artifact pollution in diffs.** Treat build/cache/temp outputs as noise unless the spec explicitly declares them as deliverables.
+20. **Overlapping fan-out writes.** Parallel branches are safer when shared/core edits are deferred to a post-fan-in integration node.
+21. **Oversized nodes.** Large multi-subsystem nodes increase replay cost and retry latency; staged decomposition improves checkpoint ergonomics.
 
 ## Notes on Reference Dotfile Conventions
 
