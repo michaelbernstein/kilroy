@@ -4,7 +4,7 @@
 
 **Goal:** Make Attractor robust when a node unexpectedly needs much more work than estimated by adding adaptive turn-budget continuation and raising planned turn budgets to a 4x baseline.
 
-**Architecture:** Add a runtime policy layer for agent-loop turn budgets (including one in-session extension path) so a stage can continue instead of restarting from scratch when it hits `max_agent_turns`. Keep failure semantics explicit by tagging turn-budget exhaustion separately from infra failures and route it to targeted recovery paths. Update `english-to-dotfile` guidance so generated graphs start with materially larger budgets (4x) and include a turn-budget recovery pattern by default.
+**Architecture:** Add a runtime policy layer for agent-loop turn budgets with explicit recovery precedence: (1) in-session auto-extension first, (2) if still exhausted, emit deterministic `failure_code=turn_budget_exhausted`, and (3) only then route to targeted graph-level recovery when a node has resumable artifacts. Keep failure semantics explicit and separate from infra failures. Update `english-to-dotfile` guidance so generated graphs start with materially larger budgets (4x) and teach when graph-level continuation is appropriate vs when in-session continuation is sufficient.
 
 **Tech Stack:** Go (`internal/agent`, `internal/attractor/engine`), DOT graph conventions, skill docs (`skills/english-to-dotfile/SKILL.md`), Go test suite.
 
@@ -75,11 +75,13 @@ if cfg.RuntimePolicy.AgentTurnAutoExtendMaxExtensions == nil {
 ```go
 type RunOptions struct {
     // existing fields...
-    AgentTurnAutoExtendEnabled       bool
-    AgentTurnAutoExtendMultiplier    int
-    AgentTurnAutoExtendMaxExtensions int
+    AgentTurnAutoExtendEnabled       *bool
+    AgentTurnAutoExtendMultiplier    *int
+    AgentTurnAutoExtendMaxExtensions *int
 }
 ```
+
+Add resolver guards in the engine path so nil/invalid values fall back to defaults (`enabled=true`, `multiplier=4`, `max_extensions=1`) before use.
 
 **Step 4: Run focused tests to verify pass**
 
@@ -93,29 +95,35 @@ git add internal/attractor/engine/config.go internal/attractor/engine/run_with_c
 git commit -m "feat(engine): add runtime policy controls for adaptive agent turn-budget extension with 4x default multiplier"
 ```
 
-### Task 2: Add Session-Level MaxTurns Mutation for In-Session Continuation
+### Task 2: Add Session-Level Turn-Budget Mutation + Continue-Without-New-User-Input
 
 **Files:**
 - Modify: `internal/agent/session.go`
 - Modify: `internal/agent/events.go`
 - Test: `internal/agent/session_dod_test.go`
 
-**Step 1: Write failing test for increasing max turns after turn-limit hit**
+**Step 1: Write failing tests for safe continuation semantics**
 
 ```go
 func TestSession_CanIncreaseMaxTurnsAfterTurnLimit(t *testing.T) {
     // Arrange: session with MaxTurns=1 and fake client requiring >1 rounds.
-    // Act: ProcessInput returns ErrTurnLimit, then SetMaxTurns(4), then ProcessInput again.
-    // Assert: second call succeeds without creating a new session.
+    // Act: ProcessInput returns ErrTurnLimit, then SetMaxTurns(4), then Continue(ctx).
+    // Assert: continuation succeeds in the SAME session.
+}
+
+func TestSession_Continue_DoesNotAppendSyntheticUserTurn(t *testing.T) {
+    // Arrange: hit ErrTurnLimit once.
+    // Act: call Continue(ctx).
+    // Assert: no extra TurnUserInput is appended; history shape remains coherent.
 }
 ```
 
 **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/agent -run IncreaseMaxTurnsAfterTurnLimit -count=1`
-Expected: FAIL because no setter exists.
+Expected: FAIL because setter/continue APIs do not exist.
 
-**Step 3: Implement minimal API and event emission**
+**Step 3: Implement minimal API + internal session continuation path**
 
 ```go
 const (
@@ -143,16 +151,39 @@ func (s *Session) SetMaxTurns(maxTurns int) {
 }
 ```
 
+```go
+type processOneInputOpts struct {
+    appendUserInput bool
+}
+
+func (s *Session) Continue(ctx context.Context) (string, error) {
+    // Continue current conversation state without appending a synthetic user turn.
+    return s.processOneInput(ctx, "", processOneInputOpts{appendUserInput: false})
+}
+```
+
+```go
+func (s *Session) processOneInput(ctx context.Context, input string, opts processOneInputOpts) (string, error) {
+    if opts.appendUserInput {
+        s.emit(EventUserInput, map[string]any{"text": input})
+        s.appendTurn(TurnUserInput, llm.User(input))
+    }
+    // existing logic...
+}
+```
+
+Document intent in code comments: turn counters remain monotonic and are not reset; increasing `MaxTurns` only raises the ceiling for the existing session.
+
 **Step 4: Run targeted tests**
 
-Run: `go test ./internal/agent -run 'IncreaseMaxTurnsAfterTurnLimit|TurnLimit' -count=1`
+Run: `go test ./internal/agent -run 'IncreaseMaxTurnsAfterTurnLimit|Continue_DoesNotAppendSyntheticUserTurn|TurnLimit' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
 git add internal/agent/session.go internal/agent/events.go internal/agent/session_dod_test.go
-git commit -m "feat(agent): support in-session max_turns increases so turn-limit hits can continue without session reset"
+git commit -m "feat(agent): support turn-budget adjustment and same-session continuation without synthetic user turns"
 ```
 
 ### Task 3: Implement Adaptive Turn-Budget Continuation in Codergen Agent-Loop
@@ -182,7 +213,7 @@ func TestCodergenAgentLoop_ExhaustedAfterMaxExtensions_ReturnsDeterministicTurnB
 Run: `go test ./internal/attractor/engine -run CodergenAgentLoop_ExtendsTurnBudget -count=1`
 Expected: FAIL (no extension behavior yet).
 
-**Step 3: Implement extension loop in `agent_loop` execution path**
+**Step 3: Implement extension loop in `agent_loop` execution path (primary recovery path)**
 
 ```go
 type turnBudgetPolicy struct {
@@ -205,14 +236,17 @@ if errors.Is(runErr, agent.ErrTurnLimit) && policy.enabled {
         sess.SetMaxTurns(next)
         appendProgressTurnBudgetExtended(execCtx, node.ID, current, next, ext+1, policy.maxExtensions)
         current = next
-        text, runErr = sess.ProcessInput(ctx, "Continue from your current work. Do not restart analysis. Finish remaining acceptance criteria and write status JSON.")
+        text, runErr = sess.Continue(ctx)
     }
+}
+if errors.Is(runErr, agent.ErrTurnLimit) {
+    return text, markTurnBudgetExhausted(runErr, current, policy)
 }
 ```
 
 **Step 4: Run targeted engine tests**
 
-Run: `go test ./internal/attractor/engine -run 'CodergenAgentLoop_ExtendsTurnBudget|FailoverSkipsTurnLimit' -count=1`
+Run: `go test ./internal/attractor/engine -run 'CodergenAgentLoop_ExtendsTurnBudget|CodergenAgentLoop_ExhaustedAfterMaxExtensions|FailoverSkipsTurnLimit' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -222,7 +256,7 @@ git add internal/attractor/engine/codergen_router.go internal/attractor/engine/c
 git commit -m "feat(codergen): auto-extend agent-loop turn budgets 4x and continue in-session on unexpected turn-limit exhaustion"
 ```
 
-### Task 4: Add Explicit Failure Code for Turn-Budget Exhaustion
+### Task 4: Add Explicit Failure Classification for Turn-Budget Exhaustion
 
 **Files:**
 - Modify: `internal/attractor/engine/provider_error_classification.go`
@@ -233,10 +267,10 @@ git commit -m "feat(codergen): auto-extend agent-loop turn budgets 4x and contin
 **Step 1: Write failing tests for turn-budget failure coding**
 
 ```go
-func TestClassifyAPIError_TurnLimitMapsToTurnBudgetExhaustedCode(t *testing.T) {
-    cls, sig, code := classifyAPIErrorDetailed(fmt.Errorf("turn limit reached (max_turns=40)"))
-    if cls != failureClassDeterministic || code != "turn_budget_exhausted" {
-        t.Fatalf("got cls=%q code=%q sig=%q", cls, code, sig)
+func TestClassifyCodergenFailure_TurnLimitMapsToTurnBudgetExhaustedCode(t *testing.T) {
+    info := classifyCodergenFailure(fmt.Errorf("%w (max_turns=40)", agent.ErrTurnLimit))
+    if info.Class != failureClassDeterministic || info.Code != "turn_budget_exhausted" {
+        t.Fatalf("got class=%q code=%q signature=%q", info.Class, info.Code, info.Signature)
     }
 }
 ```
@@ -246,23 +280,30 @@ func TestClassifyAPIError_TurnLimitMapsToTurnBudgetExhaustedCode(t *testing.T) {
 Run: `go test ./internal/attractor/engine -run TurnLimitMapsToTurnBudgetExhaustedCode -count=1`
 Expected: FAIL (code not emitted yet).
 
-**Step 3: Implement detailed classification + context update propagation**
+**Step 3: Implement a single codergen-error classifier + context propagation**
 
 ```go
-type apiFailureInfo struct {
+type codergenFailureInfo struct {
     Class     string
     Signature string
     Code      string
 }
 
-func classifyAPIErrorDetailed(err error) apiFailureInfo {
-    // include explicit turn-limit detection
-    // Code: "turn_budget_exhausted"
+func classifyCodergenFailure(err error) codergenFailureInfo {
+    if errors.Is(err, agent.ErrTurnLimit) {
+        return codergenFailureInfo{
+            Class:     failureClassDeterministic,
+            Signature: "agent_turn_limit|api|exhausted",
+            Code:      "turn_budget_exhausted",
+        }
+    }
+    class, sig := classifyAPIError(err)
+    return codergenFailureInfo{Class: class, Signature: sig}
 }
 ```
 
 ```go
-info := classifyAPIErrorDetailed(err)
+info := classifyCodergenFailure(err)
 return runtime.Outcome{
     Status:        runtime.StatusRetry,
     FailureReason: err.Error(),
@@ -278,9 +319,11 @@ return runtime.Outcome{
 }, nil
 ```
 
+Also add guard to avoid writing empty `failure_code` values into context updates (only set when non-empty).
+
 **Step 4: Run focused tests**
 
-Run: `go test ./internal/attractor/engine -run 'TurnLimitMapsToTurnBudgetExhaustedCode|retry_failure_class' -count=1`
+Run: `go test ./internal/attractor/engine -run 'ClassifyCodergenFailure|TurnLimitMapsToTurnBudgetExhaustedCode|retry_failure_class' -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -303,7 +346,7 @@ rg -n "unknown complexity|turn_budget_exhausted|4x|max_agent_turns" skills/engli
 
 Expected initially: Missing one or more required guidance sections.
 
-**Step 2: Add concise guidance + pattern snippet**
+**Step 2: Add concise guidance + pattern snippet (explicit precedence)**
 
 ```dot
 check_X -> continue_X [condition="outcome=fail && context.failure_code=turn_budget_exhausted"]
@@ -314,18 +357,19 @@ check_X -> impl_X     [condition="outcome=fail && context.failure_class=transien
 Add guidance text:
 - Treat node complexity estimates as uncertain; default to high initial budgets.
 - Use a 4x turn-budget baseline shift relative to prior templates.
-- Prefer continuation/recovery node over full-stage restart for `turn_budget_exhausted`.
+- Prefer in-session extension first (engine/runtime behavior).
+- Use graph-level `continue_X` recovery nodes for `turn_budget_exhausted` only when a stage has resumable artifacts and rework cost is high.
 
 **Step 3: Include concrete budget examples**
 
 ```text
-Previous heuristic examples: 10 / 25 / 60
-New baseline examples (4x): 40 / 100 / 240
+Current common examples: 20 / 24 / 30 / 42 / 60
+New baseline examples (4x): 80 / 96 / 120 / 168 / 240
 ```
 
 **Step 4: Validate the skill text contains all required guidance**
 
-Run: `rg -n "unknown complexity|turn_budget_exhausted|4x|40 / 100 / 240|continue_X" skills/english-to-dotfile/SKILL.md`
+Run: `rg -n "unknown complexity|turn_budget_exhausted|in-session extension|4x|80 / 96 / 120 / 168 / 240|continue_X" skills/english-to-dotfile/SKILL.md`
 Expected: all patterns found.
 
 **Step 5: Commit**
@@ -359,7 +403,7 @@ impl_analysis [max_agent_turns=240, ...]      // was 60
 verify_analysis [max_agent_turns=96, ...]     // was 24
 ```
 
-Add continuation node:
+Add continuation node only where resumable artifacts already exist and replay cost is high (example shown for analysis path):
 ```dot
 continue_analysis [
   shape=box,
@@ -371,6 +415,8 @@ continue_analysis [
 check_analysis -> continue_analysis [condition="outcome=fail && context.failure_code=turn_budget_exhausted", label="continue"]
 continue_analysis -> verify_analysis
 ```
+
+Document in the plan text for this task: this graph-level continuation is a fallback after in-session extension is exhausted, not a replacement for runtime continuation.
 
 **Step 3: Validate graph again**
 
@@ -405,7 +451,7 @@ git commit -m "demo(rogue_fast): adopt 4x turn budgets and add turn_budget_exhau
 
 ```text
 A) Unexpectedly heavy node now succeeds after one 4x extension
-B) Truly runaway node fails with failure_code=turn_budget_exhausted
+B) Truly runaway node fails with `failure_code=turn_budget_exhausted` after extension cap
 C) Transient infra failure still follows loop_restart guarded path
 D) Deterministic failure still emits stage_retry_blocked
 ```
@@ -432,4 +478,3 @@ Write `docs/plans/2026-02-11-adaptive-turn-budget-and-unknown-complexity-recover
 git add docs/plans/2026-02-11-adaptive-turn-budget-and-unknown-complexity-recovery-validation.md docs/strongdm/attractor/README.md
 git commit -m "docs: record adaptive turn-budget verification outcomes and operational event signatures"
 ```
-
