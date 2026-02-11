@@ -197,8 +197,9 @@ func attractorRun(args []string) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		sig := <-sigCh
-		cancel(fmt.Errorf("stopped by signal %s", sig.String()))
+		for sig := range sigCh {
+			cancel(fmt.Errorf("stopped by signal %s", sig.String()))
+		}
 	}()
 
 	res, err := engine.RunWithConfig(ctx, dotSource, cfg, engine.RunOptions{
@@ -390,7 +391,14 @@ func attractorResume(args []string) {
 		os.Exit(1)
 	}
 	// Default: no deadline. Resume may replay long stages or rehydrate large artifacts.
-	ctx := context.Background()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range sigCh {
+			cancel(fmt.Errorf("stopped by signal %s", sig.String()))
+		}
+	}()
 	var (
 		res *engine.Result
 		err error

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,10 +70,10 @@ func TestAttractorStop_KillsVerifiedAttractorProcessFromRunPID(t *testing.T) {
 	if err := json.Unmarshal(finalBytes, &final); err != nil {
 		t.Fatalf("decode final.json: %v", err)
 	}
-	if strings.TrimSpace(anyToStringStop(final["status"])) != "fail" {
+	if strings.TrimSpace(anyToString(final["status"])) != "fail" {
 		t.Fatalf("expected final status fail after stop, got: %v", final["status"])
 	}
-	if strings.TrimSpace(anyToStringStop(final["failure_reason"])) == "" {
+	if strings.TrimSpace(anyToString(final["failure_reason"])) == "" {
 		t.Fatalf("expected failure_reason in final.json after stop: %v", final)
 	}
 
@@ -86,10 +85,15 @@ func TestAttractorStop_KillsVerifiedAttractorProcessFromRunPID(t *testing.T) {
 	if err := json.Unmarshal(reqBytes, &req); err != nil {
 		t.Fatalf("decode stop_request.json: %v", err)
 	}
-	if !toBoolStop(req["force"]) {
+	if force, ok := req["force"].(bool); !ok || !force {
 		t.Fatalf("expected stop_request.force=true, got: %v", req["force"])
 	}
-	if pidVal := int(toFloatStop(req["pid"])); pidVal != pid {
+	pidNum, ok := req["pid"].(float64)
+	if !ok {
+		t.Fatalf("expected numeric stop_request.pid, got: %T (%v)", req["pid"], req["pid"])
+	}
+	pidVal := int(pidNum)
+	if pidVal != pid {
 		t.Fatalf("expected stop_request.pid=%d, got: %v", pid, req["pid"])
 	}
 }
@@ -246,35 +250,6 @@ func TestAttractorStop_ErrorsWhenNoPID(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit; output=%s", out)
 	}
-}
-
-func anyToStringStop(v any) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return strings.TrimSpace(s)
-	}
-	return strings.TrimSpace(fmt.Sprint(v))
-}
-
-func toBoolStop(v any) bool {
-	b, ok := v.(bool)
-	return ok && b
-}
-
-func toFloatStop(v any) float64 {
-	switch t := v.(type) {
-	case float64:
-		return t
-	case float32:
-		return float64(t)
-	case int:
-		return float64(t)
-	case int64:
-		return float64(t)
-	}
-	return 0
 }
 
 func TestVerifyProcessIdentity_DetectsChangedStartTime(t *testing.T) {

@@ -44,7 +44,7 @@ const (
 	branchStaleWarningInterval  = 1 * time.Minute
 )
 
-func branchLivenessKeepaliveInterval(stallTimeout time.Duration) time.Duration {
+func branchHeartbeatKeepaliveInterval(stallTimeout time.Duration) time.Duration {
 	const (
 		defaultInterval = 200 * time.Millisecond
 		minInterval     = 50 * time.Millisecond
@@ -61,6 +61,21 @@ func branchLivenessKeepaliveInterval(stallTimeout time.Duration) time.Duration {
 		return maxInterval
 	}
 	return interval
+}
+
+func eventFieldString(ev map[string]any, key string) string {
+	if ev == nil {
+		return ""
+	}
+	v, ok := ev[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" || s == "<nil>" {
+		return ""
+	}
+	return s
 }
 
 func (h *ParallelHandler) Execute(ctx context.Context, exec *Execution, node *model.Node) (runtime.Outcome, error) {
@@ -321,18 +336,18 @@ func (h *ParallelHandler) runBranch(ctx context.Context, exec *Execution, parall
 		}
 	}
 	branchEng.progressSink = func(ev map[string]any) {
-		eventName := strings.TrimSpace(fmt.Sprint(ev["event"]))
+		eventName := eventFieldString(ev, "event")
 		if eventName == "" {
 			return
 		}
 		extra := map[string]any{}
-		if nodeID := strings.TrimSpace(fmt.Sprint(ev["node_id"])); nodeID != "" {
+		if nodeID := eventFieldString(ev, "node_id"); nodeID != "" {
 			extra["branch_node_id"] = nodeID
 		}
-		if status := strings.TrimSpace(fmt.Sprint(ev["status"])); status != "" {
+		if status := eventFieldString(ev, "status"); status != "" {
 			extra["branch_status"] = status
 		}
-		if reason := strings.TrimSpace(fmt.Sprint(ev["failure_reason"])); reason != "" {
+		if reason := eventFieldString(ev, "failure_reason"); reason != "" {
 			extra["branch_failure_reason"] = reason
 		}
 		if attempt, ok := ev["attempt"]; ok {
@@ -341,10 +356,10 @@ func (h *ParallelHandler) runBranch(ctx context.Context, exec *Execution, parall
 		if maxAttempts, ok := ev["max"]; ok {
 			extra["branch_max"] = maxAttempts
 		}
-		if fromNode := strings.TrimSpace(fmt.Sprint(ev["from_node"])); fromNode != "" {
+		if fromNode := eventFieldString(ev, "from_node"); fromNode != "" {
 			extra["branch_from_node"] = fromNode
 		}
-		if toNode := strings.TrimSpace(fmt.Sprint(ev["to_node"])); toNode != "" {
+		if toNode := eventFieldString(ev, "to_node"); toNode != "" {
 			extra["branch_to_node"] = toNode
 		}
 		emitBranchProgress(eventName, extra)
@@ -352,7 +367,7 @@ func (h *ParallelHandler) runBranch(ctx context.Context, exec *Execution, parall
 	emitBranchProgress("branch_subgraph_start", nil)
 	keepaliveStop := make(chan struct{})
 	keepaliveDone := make(chan struct{})
-	keepaliveInterval := branchLivenessKeepaliveInterval(exec.Engine.Options.StallTimeout)
+	keepaliveInterval := branchHeartbeatKeepaliveInterval(exec.Engine.Options.StallTimeout)
 	go func() {
 		defer close(keepaliveDone)
 		ticker := time.NewTicker(keepaliveInterval)
