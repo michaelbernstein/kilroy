@@ -592,7 +592,7 @@ func lintEscalationModelsSyntax(g *model.Graph) []Diagnostic {
 				})
 				continue
 			}
-			prov := strings.TrimSpace(entry[:idx])
+			prov := strings.ToLower(strings.TrimSpace(entry[:idx]))
 			mod := strings.TrimSpace(entry[idx+1:])
 			if prov == "" {
 				diags = append(diags, Diagnostic{

@@ -22,8 +22,9 @@ func TestParseEscalationModels_SingleEntry(t *testing.T) {
 	if len(chain) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(chain))
 	}
-	if chain[0].Provider != "kimi" || chain[0].Model != "kimi-k2.5" {
-		t.Fatalf("got %+v", chain[0])
+	wantProv := normalizeProviderKey("kimi")
+	if chain[0].Provider != wantProv || chain[0].Model != "kimi-k2.5" {
+		t.Fatalf("got %+v, want provider=%q", chain[0], wantProv)
 	}
 }
 
@@ -33,9 +34,9 @@ func TestParseEscalationModels_MultipleEntries(t *testing.T) {
 		t.Fatalf("expected 3 entries, got %d", len(chain))
 	}
 	expected := []providerModel{
-		{Provider: "kimi", Model: "kimi-k2.5"},
-		{Provider: "google", Model: "gemini-pro"},
-		{Provider: "anthropic", Model: "claude-opus-4-6"},
+		{Provider: normalizeProviderKey("kimi"), Model: "kimi-k2.5"},
+		{Provider: normalizeProviderKey("google"), Model: "gemini-pro"},
+		{Provider: normalizeProviderKey("anthropic"), Model: "claude-opus-4-6"},
 	}
 	for i, e := range expected {
 		if chain[i].Provider != e.Provider || chain[i].Model != e.Model {
@@ -49,7 +50,7 @@ func TestParseEscalationModels_WhitespaceHandling(t *testing.T) {
 	if len(chain) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(chain))
 	}
-	if chain[0].Provider != "kimi" || chain[1].Provider != "google" {
+	if chain[0].Provider != normalizeProviderKey("kimi") || chain[1].Provider != normalizeProviderKey("google") {
 		t.Fatalf("providers: %q, %q", chain[0].Provider, chain[1].Provider)
 	}
 }

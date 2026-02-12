@@ -748,7 +748,7 @@ Use Phase 0B to decide concrete model IDs, providers, executor plan, parallelism
 
 When producing the Medium or High option, generate an `escalation_models` attribute for complex implementation nodes (class="hard"). The chain should:
 
-1. Include all available models ordered by cost (cheapest first, most expensive last)
+1. Include all available models ordered by capability (least capable first, most capable last — typically correlates with cost)
 2. Use highest reasoning/thinking settings (the escalation is for capability, not speed)
 3. Skip models that are already the node's primary model (from the stylesheet)
 4. Set `max_retries` on nodes with escalation chains to accommodate the full chain: `(len(chain) + 1) * (retries_before_escalation + 1) - 1`
