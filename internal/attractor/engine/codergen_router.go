@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,10 @@ import (
 	"github.com/strongdm/kilroy/internal/llm"
 	"github.com/strongdm/kilroy/internal/llmclient"
 )
+
+// anthropicVersionDotRe matches dots between digits in model version numbers
+// (e.g. "4.5", "3.7") without touching other dots.
+var anthropicVersionDotRe = regexp.MustCompile(`(\d)\.(\d)`)
 
 type CodergenRouter struct {
 	cfg     *RunConfigFile
@@ -1693,7 +1698,7 @@ func defaultCLIInvocation(provider string, modelID string, worktreeDir string) (
 	// Anthropic CLI expects dashes in version numbers (claude-sonnet-4-5),
 	// but the OpenRouter catalog uses dots (claude-sonnet-4.5).
 	if normalizeProviderKey(provider) == "anthropic" {
-		modelID = strings.ReplaceAll(modelID, ".", "-")
+		modelID = anthropicVersionDotRe.ReplaceAllString(modelID, "${1}-${2}")
 	}
 	exe, args = materializeCLIInvocation(*spec, modelID, worktreeDir, "")
 	return exe, args

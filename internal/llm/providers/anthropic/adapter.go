@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -1223,9 +1224,13 @@ func parseUsage(u map[string]any) llm.Usage {
 	return usage
 }
 
+// versionDotRe matches dots between digits in model version numbers
+// (e.g. "4.5", "3.7") without touching other dots.
+var versionDotRe = regexp.MustCompile(`(\d)\.(\d)`)
+
 // nativeModelID translates OpenRouter-format Anthropic model IDs (dots in version
 // numbers, e.g. "claude-sonnet-4.5") to the native API format (dashes, e.g.
 // "claude-sonnet-4-5"). IDs already in native format pass through unchanged.
 func nativeModelID(id string) string {
-	return strings.ReplaceAll(id, ".", "-")
+	return versionDotRe.ReplaceAllString(id, "${1}-${2}")
 }
