@@ -133,8 +133,19 @@ if (( POLL_INTERVAL_MS > 0 )); then
   poll_seconds="$(awk -v ms="$POLL_INTERVAL_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
 fi
 
-deadline_ms=$(( $(date +%s%3N) + START_TIMEOUT_MS ))
-while (( $(date +%s%3N) < deadline_ms )); do
+# macOS BSD date does not support %N; fall back to python3.
+now_ms() {
+  local ms
+  ms="$(date +%s%3N 2>/dev/null)"
+  if [[ "$ms" =~ ^[0-9]+$ ]]; then
+    echo "$ms"
+  else
+    python3 -c 'import time; print(int(time.time()*1000))'
+  fi
+}
+
+deadline_ms=$(( $(now_ms) + START_TIMEOUT_MS ))
+while (( $(now_ms) < deadline_ms )); do
   if health_ok; then
     echo "cxdb ready: http=$HTTP_BASE_URL binary=$BINARY_ADDR container=$CONTAINER_NAME image=$CXDB_IMAGE"
     # When launched via attractor autostart, keep the process around until Kilroy exits.
