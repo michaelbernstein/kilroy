@@ -27,6 +27,7 @@ func TestKilroyAttractorRegistryBundle_IncludesRequiredTypes(t *testing.T) {
 		"com.kilroy.attractor.CheckpointSaved",
 		"com.kilroy.attractor.BackendTraceRef",
 		"com.kilroy.attractor.Blob",
+		"com.kilroy.attractor.AssistantMessage",
 	}
 	for _, typ := range required {
 		if _, ok := bundle.Types[typ]; !ok {

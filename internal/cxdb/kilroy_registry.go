@@ -107,6 +107,16 @@ func KilroyAttractorRegistryBundle() (bundleID string, bundle RegistryBundle, sh
 				"4": field("cxdb_context_id", "string"),
 				"5": field("cxdb_head_turn_id", "string"),
 			}),
+			"com.kilroy.attractor.AssistantMessage": typeDef(map[string]any{
+				"1": field("run_id", "string"),
+				"2": field("node_id", "string", opt()),
+				"3": field("text", "string", opt()),
+				"4": field("model", "string", opt()),
+				"5": fieldSemantic("input_tokens", "u64", "count", opt()),
+				"6": fieldSemantic("output_tokens", "u64", "count", opt()),
+				"7": field("tool_use_count", "u32", opt()),
+				"8": fieldSemantic("timestamp_ms", "u64", "unix_ms"),
+			}),
 			"com.kilroy.attractor.BackendTraceRef": typeDef(map[string]any{
 				"1": field("run_id", "string"),
 				"2": field("node_id", "string", opt()),
