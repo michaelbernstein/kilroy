@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +220,50 @@ digraph G {
 	}
 	if !found {
 		t.Fatalf("expected provider_executable_policy fail check, got %+v", report.Checks)
+	}
+}
+
+func TestRunWithConfig_WritesPIDFile(t *testing.T) {
+	repo := initTestRepo(t)
+	logsRoot := t.TempDir()
+	pinned := writePinnedCatalog(t)
+	cxdbSrv := newCXDBTestServer(t)
+
+	dot := []byte(`
+digraph G {
+  start [shape=Mdiamond]
+  exit  [shape=Msquare]
+  start -> exit
+}
+`)
+	cfg := &RunConfigFile{}
+	cfg.Version = 1
+	cfg.Repo.Path = repo
+	cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
+	cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
+	cfg.ModelDB.OpenRouterModelInfoPath = pinned
+	cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
+	cfg.Git.RunBranchPrefix = "attractor/run"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	res, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "pid-file", LogsRoot: logsRoot})
+	if err != nil {
+		t.Fatalf("RunWithConfig: %v", err)
+	}
+
+	pidPath := filepath.Join(res.LogsRoot, "run.pid")
+	b, readErr := os.ReadFile(pidPath)
+	if readErr != nil {
+		t.Fatalf("expected run.pid to exist after foreground run, got: %v", readErr)
+	}
+	pidStr := strings.TrimSpace(string(b))
+	if pidStr == "" {
+		t.Fatal("run.pid is empty")
+	}
+	pid, parseErr := strconv.Atoi(pidStr)
+	if parseErr != nil || pid <= 0 {
+		t.Fatalf("run.pid contains invalid pid: %q", pidStr)
 	}
 }
 

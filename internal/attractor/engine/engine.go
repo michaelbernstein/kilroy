@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	rdebug "runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -309,6 +310,8 @@ func (e *Engine) run(ctx context.Context) (res *Result, err error) {
 	if err := os.MkdirAll(e.LogsRoot, 0o755); err != nil {
 		return nil, err
 	}
+	// Record PID so attractor status can detect a running process.
+	_ = os.WriteFile(filepath.Join(e.LogsRoot, "run.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
 	// Snapshot the run config for repeatability and resume.
 	if e.RunConfig != nil {
 		_ = writeJSON(filepath.Join(e.LogsRoot, "run_config.json"), e.RunConfig)
