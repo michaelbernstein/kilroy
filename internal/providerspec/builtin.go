@@ -99,6 +99,19 @@ var builtinSpecs = map[string]Spec{
 		},
 		Failover: []string{"zai"},
 	},
+	"minimax": {
+		Key:     "minimax",
+		Aliases: []string{"minimax-ai"},
+		API: &APISpec{
+			Protocol:           ProtocolOpenAIChatCompletions,
+			DefaultBaseURL:     "https://api.minimax.io",
+			DefaultPath:        "/v1/chat/completions",
+			DefaultAPIKeyEnv:   "MINIMAX_API_KEY",
+			ProviderOptionsKey: "minimax",
+			ProfileFamily:      "openai",
+		},
+		Failover: []string{"cerebras"},
+	},
 }
 
 func Builtin(key string) (Spec, bool) {
