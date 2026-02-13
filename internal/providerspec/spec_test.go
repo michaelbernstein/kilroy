@@ -4,7 +4,7 @@ import "testing"
 
 func TestBuiltinSpecsIncludeCoreAndNewProviders(t *testing.T) {
 	s := Builtins()
-	for _, key := range []string{"openai", "anthropic", "google", "kimi", "zai", "cerebras"} {
+	for _, key := range []string{"openai", "anthropic", "google", "kimi", "zai", "cerebras", "minimax"} {
 		if _, ok := s[key]; !ok {
 			t.Fatalf("missing builtin provider %q", key)
 		}
@@ -29,6 +29,9 @@ func TestCanonicalProviderKey_Aliases(t *testing.T) {
 	}
 	if got := CanonicalProviderKey("cerebras-ai"); got != "cerebras" {
 		t.Fatalf("cerebras-ai alias: got %q want %q", got, "cerebras")
+	}
+	if got := CanonicalProviderKey("minimax-ai"); got != "minimax" {
+		t.Fatalf("minimax-ai alias: got %q want %q", got, "minimax")
 	}
 	if got := CanonicalProviderKey("glm"); got != "glm" {
 		t.Fatalf("unknown provider keys should pass through unchanged, got %q", got)
@@ -73,6 +76,25 @@ func TestBuiltinKimiDefaultsToCodingAnthropicAPI(t *testing.T) {
 	}
 }
 
+func TestBuiltinMinimaxDefaultsToOpenAICompatAPI(t *testing.T) {
+	spec, ok := Builtin("minimax")
+	if !ok {
+		t.Fatalf("expected minimax builtin")
+	}
+	if spec.API == nil {
+		t.Fatalf("expected minimax api spec")
+	}
+	if got := spec.API.Protocol; got != ProtocolOpenAIChatCompletions {
+		t.Fatalf("minimax protocol: got %q want %q", got, ProtocolOpenAIChatCompletions)
+	}
+	if got := spec.API.DefaultBaseURL; got != "https://api.minimax.io" {
+		t.Fatalf("minimax base url: got %q want %q", got, "https://api.minimax.io")
+	}
+	if got := spec.API.DefaultAPIKeyEnv; got != "MINIMAX_API_KEY" {
+		t.Fatalf("minimax api_key_env: got %q want %q", got, "MINIMAX_API_KEY")
+	}
+}
+
 func TestBuiltinFailoverDefaultsAreSingleHop(t *testing.T) {
 	cases := []struct {
 		provider string
@@ -84,6 +106,7 @@ func TestBuiltinFailoverDefaultsAreSingleHop(t *testing.T) {
 		{provider: "kimi", want: []string{"zai"}},
 		{provider: "zai", want: []string{"cerebras"}},
 		{provider: "cerebras", want: []string{"zai"}},
+		{provider: "minimax", want: []string{"cerebras"}},
 	}
 	for _, tc := range cases {
 		spec, ok := Builtin(tc.provider)
