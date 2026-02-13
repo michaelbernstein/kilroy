@@ -25,7 +25,7 @@ func TestCLIStreamCXDB_DecomposesConversationTurns(t *testing.T) {
 set -euo pipefail
 if [[ "${1:-}" == "--help" ]]; then
 cat <<'EOF'
-Usage: claude -p --output-format stream-json --verbose --model MODEL
+Usage: claude -p --dangerously-skip-permissions --output-format stream-json --verbose --model MODEL
 EOF
 exit 0
 fi
