@@ -641,6 +641,19 @@ func (e *Engine) runLoop(ctx context.Context, current string, completed []string
 		}
 		if nextHop == nil || nextHop.Edge == nil {
 			if out.Status == runtime.StatusFail {
+				// Before dying, try the retry_target chain (same fallback as goal gates).
+				retryTarget := resolveRetryTarget(e.Graph, node.ID)
+				if retryTarget != "" {
+					e.appendProgress(map[string]any{
+						"event":          "no_matching_fail_edge_fallback",
+						"node_id":        node.ID,
+						"retry_target":   retryTarget,
+						"failure_reason": out.FailureReason,
+					})
+					e.incomingEdge = nil
+					current = retryTarget
+					continue
+				}
 				failedTurnID, _ := e.cxdbRunFailed(ctx, node.ID, sha, out.FailureReason)
 				final := runtime.FinalOutcome{
 					Timestamp:         time.Now().UTC(),
