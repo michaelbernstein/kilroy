@@ -30,7 +30,6 @@ digraph rogue_port {
     expand_spec [
         shape=box,
         auto_status=true,
-        max_agent_turns=40,
         timeout="3600",
         prompt="Given these requirements: Port the classic Rogue 5.4.4 game from C to Rust compiled to WebAssembly, playable in a browser. The original C source is at demo/rogue/original-rogue/ — about 16,800 lines across 33 files. The deliverable is a single HTML page at demo/rogue/rogue-wasm/www/index.html with classic ASCII terminal rendering: 80x24 grid, @ player, # corridors, monster letters A-Z, dark background, monospace font. This must be an exact mechanical port — same dungeon generation algorithms, same monster stats and AI, same item tables, same RNG formula, same combat math — a faithful 1:1 translation of every game system. ncurses I/O gets replaced by a WASM bridge to a JS terminal renderer, and save/load uses localStorage instead of the filesystem.\n\nRead ALL files in demo/rogue/original-rogue/ to understand the complete codebase structure, types, algorithms, and game systems.\n\nExpand into a detailed spec covering:\n1. Project structure: Cargo.toml configuration, src/ module layout matching C files, www/ directory for HTML/JS\n2. Module-by-module mapping: each C file to its Rust module equivalent\n3. Data types: all structs, enums, constants, globals translated from C (rogue.h, extern.h, extern.c)\n4. Game systems in detail:\n   - Dungeon generation (new_level.c, passages.c, rooms)\n   - Combat and fight mechanics (fight.c, armor.c, weapons.c)\n   - Monster AI and behavior (chase.c, monsters.c, daemon.c, daemons.c)\n   - Items: potions, scrolls, rings, sticks, weapons, armor, food (potions.c, scrolls.c, rings.c, sticks.c, pack.c, things.c)\n   - Player movement and commands (move.c, command.c)\n   - RNG formula and seeding\n   - Score and death handling (rip.c)\n   - Options and configuration (options.c)\n5. I/O bridge architecture: ncurses API calls to replace, WASM binding design, JS terminal renderer requirements\n6. Save/load: localStorage serialization strategy replacing filesystem I/O (mach_dep.c)\n7. Build commands: cargo build --target wasm32-unknown-unknown, wasm-pack build\n8. Test plan: unit tests for game logic, integration approach\n9. Acceptance criteria: playable game with faithful mechanics and browser rendering\n\nWrite the spec to .ai/spec.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
@@ -38,14 +37,12 @@ digraph rogue_port {
     // ── Definition of Done — 3-way fan-out ────────────────────────────
     dod_a [
         shape=box,
-        max_agent_turns=12,
         timeout="3600",
         prompt="Goal: $goal\n\nPropose a comprehensive Definition of Done for porting Rogue 5.4.4 from C to Rust/WASM.\n\nRead .ai/spec.md for the full project spec. Skim key files in demo/rogue/original-rogue/ (especially rogue.h, extern.h, main.c) to ground your understanding.\n\nYour DoD must cover:\n- Build gates: cargo build --target wasm32-unknown-unknown passes, cargo test passes, wasm-pack build succeeds\n- Functional completeness: all game systems ported (dungeon gen, combat, all monster types A-Z, all item types, RNG, save/load)\n- Fidelity gates: algorithms, stat tables, combat formulas, RNG match original C line-by-line\n- Browser gates: 80x24 ASCII terminal renders correctly, keyboard input works, @ / # / A-Z display properly, dark background + monospace font\n- Save/load gates: game state persists in localStorage, can save and resume\n- Test coverage: unit tests for core game logic (combat math, RNG, dungeon gen)\n- Performance: smooth rendering in browser, no visible lag on keypress\n\nWrite your DoD proposal to .ai/dod_a.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
 
     dod_b [
         shape=box,
-        max_agent_turns=12,
         timeout="3600",
         llm_provider="zai",
         llm_model="glm-4.7",
@@ -54,7 +51,6 @@ digraph rogue_port {
 
     dod_c [
         shape=box,
-        max_agent_turns=12,
         timeout="3600",
         llm_provider="google",
         llm_model="gemini-3-pro-preview",
@@ -63,7 +59,6 @@ digraph rogue_port {
 
     consolidate_dod [
         shape=box,
-        max_agent_turns=12,
         timeout="3600",
         prompt="Goal: $goal\n\nSynthesize three Definition of Done proposals into one authoritative DoD.\n\nRead .ai/dod_a.md, .ai/dod_b.md, .ai/dod_c.md.\n\nCombine the strongest elements from each proposal. Resolve any conflicts by choosing the more rigorous criterion. The final DoD should be:\n- Concrete and testable (every criterion has a specific verification command or check)\n- Complete (covers build, functionality, fidelity, browser, save/load, tests, performance)\n- Prioritized (must-have vs nice-to-have for iterative development)\n\nWrite the consolidated DoD to .ai/definition_of_done.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
@@ -71,14 +66,12 @@ digraph rogue_port {
     // ── Implementation planning — 3-way fan-out ──────────────────────
     plan_a [
         shape=box,
-        max_agent_turns=20,
         timeout="3600",
         prompt="Goal: $goal\n\nCreate a detailed implementation plan for porting Rogue 5.4.4 from C to Rust/WASM.\n\nRead .ai/spec.md for the project spec.\nRead .ai/definition_of_done.md for acceptance criteria.\nRead demo/rogue/original-rogue/rogue.h, extern.h, extern.c, main.c for core types and entry point.\nIf any .ai/postmortem_*.md files exist, read them ALL for lessons from prior iterations.\n\nFocus your plan on a BOTTOM-UP approach:\n1. Project scaffolding: Cargo.toml with wasm-bindgen/web-sys/js-sys, module structure\n2. Core types first: translate all structs, enums, constants from rogue.h and extern.h\n3. Global state: design Rust equivalent of C globals (extern.c)\n4. RNG: port the exact random number generator formula\n5. Dungeon generation: rooms, corridors, passages (new_level.c, passages.c)\n6. Game entities: monsters, items, player (monsters.c, things.c, pack.c)\n7. Game mechanics: combat, movement, commands (fight.c, move.c, command.c)\n8. Item effects: potions, scrolls, rings, sticks (potions.c, scrolls.c, rings.c, sticks.c)\n9. Daemons/scheduling: daemon.c, daemons.c\n10. I/O layer: WASM bridge replacing ncurses (io.c)\n11. HTML/JS terminal renderer\n12. Save/load: localStorage (mach_dep.c)\n13. Integration: main game loop, death/score (rip.c)\n\nWrite your plan to .ai/plan_a.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
 
     plan_b [
         shape=box,
-        max_agent_turns=20,
         timeout="3600",
         llm_provider="zai",
         llm_model="glm-4.7",
@@ -87,7 +80,6 @@ digraph rogue_port {
 
     plan_c [
         shape=box,
-        max_agent_turns=20,
         timeout="3600",
         llm_provider="google",
         llm_model="gemini-3-pro-preview",
@@ -96,7 +88,6 @@ digraph rogue_port {
 
     debate_consolidate [
         shape=box,
-        max_agent_turns=15,
         timeout="3600",
         prompt="Goal: $goal\n\nSynthesize three implementation plans into one authoritative plan.\n\nRead .ai/plan_a.md, .ai/plan_b.md, .ai/plan_c.md.\nRead .ai/spec.md and .ai/definition_of_done.md for context.\nIf any .ai/postmortem_*.md files exist, read them — the synthesized plan MUST address all issues identified in postmortems.\n\nDebate the merits of each approach:\n- Which ordering minimizes risk of getting stuck?\n- Which approach handles C-to-Rust idiom translation best?\n- Which plan is most realistic for a single implementation pass?\n\nProduce a final consolidated plan that:\n- Takes the best elements from each proposal\n- Orders work to maintain compilability at every step (build-first)\n- Identifies the critical path and potential blockers\n- Includes specific file-to-module mappings\n- Lists concrete build/test checkpoints\n\nWrite the final plan to .ai/plan_final.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
@@ -106,7 +97,6 @@ digraph rogue_port {
         shape=box,
         class="hard",
         max_retries=5,
-        max_agent_turns=200,
         allow_partial=true,
         escalation_models="zai:glm-4.7, google:gemini-3-pro-preview",
         prompt="Goal: $goal\n\nFollow the implementation plan in .ai/plan_final.md. Read .ai/spec.md for the full spec and .ai/definition_of_done.md for acceptance criteria.\n\nPort the classic Rogue 5.4.4 from C to Rust/WASM. The original C source is at demo/rogue/original-rogue/. Read C source files as needed during implementation — this is a faithful 1:1 mechanical port.\n\nCreate the Rust project at demo/rogue/rogue-wasm/ with:\n- Cargo.toml with wasm-bindgen, web-sys, js-sys dependencies\n- src/lib.rs as the WASM entry point\n- src/ modules mapping to the original C files (e.g., src/fight.rs, src/chase.rs, src/new_level.rs, etc.)\n- www/index.html with the ASCII terminal renderer (80x24 grid, monospace font, dark background)\n- www/ for any JavaScript bridge code\n\nBuild-first strategy:\n- FIRST MILESTONE: Achieve a clean `cd demo/rogue/rogue-wasm && cargo build --target wasm32-unknown-unknown` with stub/skeleton implementations before filling in game logic.\n- If you spend more than a third of your turns on build errors without reaching a clean compile, simplify: comment out broken code, add stubs, get to green, then iterate.\n\nImplementation approach:\n1. Create project structure and Cargo.toml (verify: cargo build --target wasm32-unknown-unknown)\n2. Port core types and constants from rogue.h/extern.h (verify: cargo build)\n3. Port game state management — Rust equivalent of C globals (verify: cargo build)\n4. Port RNG formula exactly (verify: cargo build + cargo test)\n5. Port game systems one at a time per .ai/plan_final.md ordering (verify: cargo build after each)\n6. Implement WASM bridge replacing ncurses I/O (verify: cargo build)\n7. Create HTML page with JS terminal renderer at www/index.html\n8. Implement save/load with localStorage replacing filesystem I/O\n9. Write unit tests for core game logic (verify: cargo test)\n\nDo NOT proceed to the next module until the current one compiles.\n\nLog your progress to .ai/implementation_log.md after each major step. Include: what was ported, what compiles, what remains.\n\nAcceptance:\n- cd demo/rogue/rogue-wasm && cargo build --target wasm32-unknown-unknown must pass\n- cd demo/rogue/rogue-wasm && cargo test must pass\n- demo/rogue/rogue-wasm/www/index.html must exist with terminal rendering code\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if all acceptance criteria pass, outcome=fail with failure_reason and details otherwise."
@@ -116,7 +106,6 @@ digraph rogue_port {
     verify_impl [
         shape=box,
         class="verify",
-        max_agent_turns=15,
         timeout="3600",
         prompt="Verify the Rogue 5.4.4 C-to-Rust/WASM port implementation.\n\nRun:\n1. cd demo/rogue/rogue-wasm && cargo build --target wasm32-unknown-unknown\n2. cd demo/rogue/rogue-wasm && cargo test\n3. Structural integrity + formatting: cd demo/rogue/rogue-wasm && cargo fmt --all -- --check\n4. Lint (advisory, do not fail on warnings alone):\n   changed=$(git diff --name-only $base_sha -- '*.rs')\n   if [ -n \"$changed\" ]; then cd demo/rogue/rogue-wasm && cargo clippy --target wasm32-unknown-unknown 2>&1; fi\n   Record clippy output in results. Clippy warnings are expected in a mechanical C port — report them but do not treat warnings as blocking failures. Only fail if clippy reports hard errors.\n   Skip entirely if no .rs files changed.\n5. Check demo/rogue/rogue-wasm/www/index.html exists and contains terminal rendering code\n6. Check demo/rogue/rogue-wasm/Cargo.toml exists with wasm-bindgen dependency\n7. Check demo/rogue/rogue-wasm/src/lib.rs exists as WASM entry point\n8. Artifact hygiene: fail if git diff --name-only $base_sha -- includes paths under target/, dist/, pkg/, node_modules/, .wasm files, or backup/temp patterns\n\nIMPORTANT: Do NOT run repo-wide lint or tests. Only check demo/rogue/rogue-wasm/.\n\nWrite results to .ai/verify_impl.md including full clippy output for reference.\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if steps 1-3 and 5-8 pass (clippy warnings are advisory), outcome=fail with failure_reason and details."
     ]
@@ -127,7 +116,6 @@ digraph rogue_port {
     review_kimi [
         shape=box,
         class="review",
-        max_agent_turns=25,
         timeout="3600",
         prompt="Goal: $goal\n\nReview the Rogue 5.4.4 C-to-Rust/WASM port for completeness and fidelity.\n\nRead .ai/spec.md for requirements.\nRead .ai/definition_of_done.md for acceptance criteria.\nRead .ai/implementation_log.md for what was done.\nRead key original C files: demo/rogue/original-rogue/rogue.h, extern.h, fight.c, chase.c, new_level.c, monsters.c, io.c, command.c\nRead the Rust implementation: demo/rogue/rogue-wasm/src/ (all .rs files)\nRead the web frontend: demo/rogue/rogue-wasm/www/\n\nRun: cd demo/rogue/rogue-wasm && cargo build --target wasm32-unknown-unknown && cargo test\n\nEvaluate against DoD:\n1. Build: does it compile to WASM without errors?\n2. Completeness: are ALL 33 C source files represented in Rust modules?\n3. Fidelity: compare specific algorithms — dungeon gen room placement, combat damage formula, monster chase AI, RNG sequence\n4. I/O: is every ncurses call from io.c replaced with a working WASM equivalent?\n5. Commands: are all keyboard commands from command.c mapped and functional?\n6. Save/load: is localStorage serialization complete and correct?\n7. HTML: does index.html have proper 80x24 ASCII terminal with monospace font?\n8. Code quality: is the Rust reasonably idiomatic (not just line-by-line C-in-Rust)?\n\nWrite your review to .ai/review_kimi.md with a clear PASS or FAIL verdict, specific findings for each criterion, and a list of gaps/issues if FAIL.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
@@ -137,7 +125,6 @@ digraph rogue_port {
         class="review",
         llm_provider="zai",
         llm_model="glm-4.7",
-        max_agent_turns=25,
         timeout="3600",
         prompt="Goal: $goal\n\nReview the Rogue 5.4.4 C-to-Rust/WASM port for completeness and fidelity.\n\nRead .ai/spec.md for requirements.\nRead .ai/definition_of_done.md for acceptance criteria.\nRead .ai/implementation_log.md for what was done.\nRead key original C files: demo/rogue/original-rogue/fight.c, potions.c, scrolls.c, rings.c, sticks.c, weapons.c, armor.c\nRead the Rust implementation: demo/rogue/rogue-wasm/src/ (all .rs files)\nRead the web frontend: demo/rogue/rogue-wasm/www/\n\nRun: cd demo/rogue/rogue-wasm && cargo build --target wasm32-unknown-unknown && cargo test\n\nFocus your review on GAME MECHANICS FIDELITY:\n1. Combat math: compare fight.c damage calculations with Rust equivalent line-by-line\n2. Item effects: do all potions, scrolls, rings, sticks match original effects exactly?\n3. Armor/weapon tables: are stat tables identical to C originals?\n4. Monster stats: verify monster hit dice, experience, special attacks match monsters.c\n5. RNG: is the random number formula an exact port?\n6. Dungeon generation: do room sizes, corridor placement, treasure/monster spawning match?\n7. Daemon system: are timed events (hunger, poison, etc.) correctly ported?\n8. Edge cases: wizard mode, cursed items, monster special attacks\n\nWrite your review to .ai/review_glm.md with a clear PASS or FAIL verdict, specific findings for each criterion, and a list of gaps/issues if FAIL.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
@@ -147,7 +134,6 @@ digraph rogue_port {
         class="review",
         llm_provider="google",
         llm_model="gemini-3-pro-preview",
-        max_agent_turns=25,
         timeout="3600",
         prompt="Goal: $goal\n\nReview the Rogue 5.4.4 C-to-Rust/WASM port for completeness and fidelity.\n\nRead .ai/spec.md for requirements.\nRead .ai/definition_of_done.md for acceptance criteria.\nRead .ai/implementation_log.md for what was done.\nRead key original C files: demo/rogue/original-rogue/io.c, command.c, mach_dep.c, main.c, misc.c, init.c\nRead the Rust implementation: demo/rogue/rogue-wasm/src/ (all .rs files)\nRead the web frontend: demo/rogue/rogue-wasm/www/\n\nRun: cd demo/rogue/rogue-wasm && cargo build --target wasm32-unknown-unknown && cargo test\n\nFocus your review on I/O AND BROWSER INTEGRATION:\n1. ncurses replacement: is every function from io.c accounted for in the WASM bridge?\n2. Terminal rendering: does the JS renderer correctly handle all display operations (addch, mvaddch, clrtoeol, refresh, etc.)?\n3. Input handling: are all keyboard commands from command.c properly captured and dispatched?\n4. Game flow: does main.c's game loop translate correctly to WASM's event-driven model?\n5. Initialization: does init.c's setup sequence work in browser context?\n6. Save/load: does mach_dep.c's save/restore work with localStorage?\n7. HTML structure: is index.html self-contained with proper styling?\n8. WASM bridge: is the Rust-to-JS boundary clean and correct (no memory leaks, proper type marshaling)?\n\nWrite your review to .ai/review_gemini.md with a clear PASS or FAIL verdict, specific findings for each criterion, and a list of gaps/issues if FAIL.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
@@ -157,7 +143,6 @@ digraph rogue_port {
         shape=box,
         class="review",
         goal_gate=true,
-        max_agent_turns=10,
         timeout="3600",
         prompt="Goal: $goal\n\nReach consensus from three independent reviews of the Rogue WASM port.\n\nRead .ai/review_kimi.md, .ai/review_glm.md, .ai/review_gemini.md.\n\nSynthesize the reviews:\n1. Tally verdicts: how many PASS vs FAIL?\n2. If all three PASS, outcome=yes\n3. If majority PASS and no critical issues identified by any reviewer, outcome=yes\n4. If majority FAIL, or ANY reviewer identified critical fidelity gaps (wrong algorithms, missing game systems, broken I/O), outcome=retry\n5. Document the consensus reasoning, all identified issues, and remaining work\n\nWrite consensus to .ai/review_consensus.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=yes if consensus is PASS, outcome=retry if consensus is FAIL with failure_reason and details about what needs fixing."
     ]
@@ -165,7 +150,6 @@ digraph rogue_port {
     // ── Postmortem (on review failure) ────────────────────────────────
     postmortem [
         shape=box,
-        max_agent_turns=12,
         timeout="3600",
         prompt="Goal: $goal\n\nConduct a failure postmortem after review identified issues with the Rogue WASM port.\n\nRead .ai/review_consensus.md for the consensus verdict.\nRead .ai/review_kimi.md, .ai/review_glm.md, .ai/review_gemini.md for detailed findings.\nRead .ai/implementation_log.md for what was done.\nRead .ai/plan_final.md for the original plan.\nRead any prior .ai/postmortem_*.md files to avoid repeating past mistakes.\n\nAnalyze:\n1. What specific issues were identified by each reviewer?\n2. What is the root cause of each issue? (missing code, wrong algorithm, incomplete port, etc.)\n3. Which C source files need to be re-read and more carefully ported?\n4. What concrete changes are needed to fix each issue?\n5. What should the next implementation pass prioritize? (ordered by severity)\n6. Are there architectural changes needed in the Rust code?\n7. What worked well and should be preserved?\n\nNumber this postmortem file based on existing postmortems (postmortem_01.md, postmortem_02.md, etc.).\n\nWrite actionable guidance to .ai/postmortem_NN.md.\nThe next planning stage MUST read this file to understand what to prioritize.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success"
     ]
@@ -212,7 +196,7 @@ digraph rogue_port {
 
     // Consensus -> exit or postmortem (2-node pattern, no intermediate diamond)
     review_consensus -> exit       [condition="outcome=yes"]
-    review_consensus -> postmortem [condition="outcome=retry"]
+    review_consensus -> postmortem
 
     // Postmortem -> re-plan (loop_restart for fresh log directory)
     postmortem -> plan_a [loop_restart=true]

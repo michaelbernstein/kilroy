@@ -508,6 +508,7 @@ analyze -> fetch_next [condition="outcome=skip", label="skip", loop_restart=true
 ```
 
 When using custom outcomes, the prompt MUST tell the agent exactly which outcome values to write and when.
+For multi-outcome nodes, prefer making the non-happy-path edge unconditional (no `condition=`) so it catches any outcome the LLM writes.
 
 ##### Looping/cyclic workflows
 

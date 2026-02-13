@@ -11,7 +11,7 @@ digraph Workflow {
   ];
 
   Start [
-    node_type="start", label="Start", shape="circle", style="rounded,filled",
+    node_type="start", label="Start", shape="Mdiamond", style="rounded,filled",
     is_codergen="true", llm_provider="openai", llm_model="gpt-5.2-codex",
     max_agent_turns="4", timeout="300"
   ];
@@ -122,7 +122,7 @@ digraph Workflow {
   ];
 
   Exit [
-    node_type="exit", label="Exit", shape="doublecircle", style="rounded,filled",
+    node_type="exit", label="Exit", shape="Msquare", style="rounded,filled",
     is_codergen="true", llm_provider="openai", llm_model="gpt-5.2-codex",
     max_agent_turns="4", timeout="120"
   ];
@@ -151,7 +151,7 @@ digraph Workflow {
   ReviewGPT -> ReviewConsensus;
   ReviewOpus -> ReviewConsensus;
   ReviewConsensus -> Exit [condition="outcome=yes"];
-  ReviewConsensus -> Postmortem [condition="outcome=retry"];
+  ReviewConsensus -> Postmortem;
   Postmortem -> PlanGemini [loop_restart="true"];
   Postmortem -> PlanGPT [loop_restart="true"];
   Postmortem -> PlanOpus [loop_restart="true"];
