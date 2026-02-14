@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,5 +142,96 @@ func TestToolHandler_UsesBaseNodeEnv(t *testing.T) {
 	}
 	if !strings.Contains(output, "CARGO_TARGET_DIR=") {
 		t.Fatal("CARGO_TARGET_DIR should be set in tool node env")
+	}
+}
+
+func TestBuildCodexIsolatedEnv_PreservesToolchainPaths(t *testing.T) {
+	home := t.TempDir()
+	cargoHome := filepath.Join(home, ".cargo")
+	rustupHome := filepath.Join(home, ".rustup")
+
+	t.Setenv("HOME", home)
+	t.Setenv("CARGO_HOME", cargoHome)
+	t.Setenv("RUSTUP_HOME", rustupHome)
+	t.Setenv("CLAUDECODE", "1")
+
+	stateBase := filepath.Join(t.TempDir(), "codex-state-base")
+	t.Setenv("KILROY_CODEX_STATE_BASE", stateBase)
+
+	stageDir := t.TempDir()
+	worktree := t.TempDir()
+	env, _, err := buildCodexIsolatedEnv(stageDir, buildBaseNodeEnv(worktree))
+	if err != nil {
+		t.Fatalf("buildCodexIsolatedEnv: %v", err)
+	}
+
+	// HOME should be overridden to isolated dir (not the original home).
+	if got := envLookup(env, "HOME"); got == home {
+		t.Fatalf("HOME should be overridden to isolated dir, got original: %q", got)
+	}
+
+	// But toolchain paths should still point to the ORIGINAL home's paths.
+	if got := envLookup(env, "CARGO_HOME"); got != cargoHome {
+		t.Fatalf("CARGO_HOME: got %q want %q (should survive HOME override)", got, cargoHome)
+	}
+	if got := envLookup(env, "RUSTUP_HOME"); got != rustupHome {
+		t.Fatalf("RUSTUP_HOME: got %q want %q (should survive HOME override)", got, rustupHome)
+	}
+
+	// CLAUDECODE should be stripped.
+	if envHasKey(env, "CLAUDECODE") {
+		t.Fatal("CLAUDECODE should be stripped")
+	}
+
+	// CARGO_TARGET_DIR should be set (from buildBaseNodeEnv).
+	if !envHasKey(env, "CARGO_TARGET_DIR") {
+		t.Fatal("CARGO_TARGET_DIR should be set")
+	}
+}
+
+func TestBuildCodexIsolatedEnvWithName_RetryPreservesToolchainPaths(t *testing.T) {
+	// Regression test: retry-rebuilt codex envs must preserve toolchain
+	// paths. This is the highest-risk path — state-DB and timeout retries
+	// rebuild the env on each attempt. If they don't receive baseEnv,
+	// CARGO_TARGET_DIR and toolchain paths are silently dropped.
+	home := t.TempDir()
+	cargoHome := filepath.Join(home, ".cargo")
+	rustupHome := filepath.Join(home, ".rustup")
+
+	t.Setenv("HOME", home)
+	t.Setenv("CARGO_HOME", cargoHome)
+	t.Setenv("RUSTUP_HOME", rustupHome)
+
+	stateBase := filepath.Join(t.TempDir(), "codex-state-base")
+	t.Setenv("KILROY_CODEX_STATE_BASE", stateBase)
+
+	stageDir := t.TempDir()
+	worktree := t.TempDir()
+	baseEnv := buildBaseNodeEnv(worktree)
+
+	// Simulate multiple retry attempts like the real retry loops.
+	for attempt := 1; attempt <= 3; attempt++ {
+		name := fmt.Sprintf("codex-home-retry%d", attempt)
+		env, _, err := buildCodexIsolatedEnvWithName(stageDir, name, baseEnv)
+		if err != nil {
+			t.Fatalf("attempt %d: buildCodexIsolatedEnvWithName: %v", attempt, err)
+		}
+
+		// Each retry must have its own isolated HOME.
+		retryHome := envLookup(env, "HOME")
+		if retryHome == home {
+			t.Fatalf("attempt %d: HOME should be isolated, got original: %q", attempt, retryHome)
+		}
+
+		// Toolchain paths must survive every retry rebuild.
+		if got := envLookup(env, "CARGO_HOME"); got != cargoHome {
+			t.Fatalf("attempt %d: CARGO_HOME: got %q want %q", attempt, got, cargoHome)
+		}
+		if got := envLookup(env, "RUSTUP_HOME"); got != rustupHome {
+			t.Fatalf("attempt %d: RUSTUP_HOME: got %q want %q", attempt, got, rustupHome)
+		}
+		if !envHasKey(env, "CARGO_TARGET_DIR") {
+			t.Fatalf("attempt %d: CARGO_TARGET_DIR should be set", attempt)
+		}
 	}
 }

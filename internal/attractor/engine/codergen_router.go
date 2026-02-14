@@ -885,23 +885,19 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 	}
 	codexSemantics := usesCodexCLISemantics(providerKey, exe)
 
+	// Build the base env once — used by codex initial + retries and non-codex paths.
+	baseEnv := buildBaseNodeEnv(execCtx.WorktreeDir)
+
 	var isolatedEnv []string
 	var isolatedMeta map[string]any
 	if codexSemantics {
 		var err error
-		isolatedEnv, isolatedMeta, err = buildCodexIsolatedEnv(stageDir)
+		isolatedEnv, isolatedMeta, err = buildCodexIsolatedEnv(stageDir, baseEnv)
 		if err != nil {
 			return "", classifiedFailure(err, ""), nil
 		}
-		// Avoid cross-device link (EXDEV) errors in Rust/cargo builds:
-		// the codex sandbox may treat the workspace and /tmp as different
-		// overlay layers, causing rename() failures when cargo moves
-		// intermediate artifacts into the target directory. Setting
-		// CARGO_TARGET_DIR inside the workspace keeps all cargo I/O on
-		// the same layer. Harmless for non-Rust projects (unused env var).
-		if !envHasKey(isolatedEnv, "CARGO_TARGET_DIR") {
-			isolatedEnv = append(isolatedEnv, "CARGO_TARGET_DIR="+filepath.Join(execCtx.WorktreeDir, ".cargo-target"))
-		}
+		// CARGO_TARGET_DIR is already set by buildBaseNodeEnv — no need for
+		// the duplicate check that was here before.
 	}
 
 	// Metaspec: if a provider CLI supports both an event stream and a structured final JSON output,
@@ -992,8 +988,8 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 			cmd.Env = mergeEnvWithOverrides(isolatedEnv, contract.EnvVars)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		} else {
-			baseEnv := scrubConflictingProviderEnvKeys(os.Environ(), providerKey)
-			cmd.Env = mergeEnvWithOverrides(baseEnv, contract.EnvVars)
+			scrubbed := scrubConflictingProviderEnvKeys(baseEnv, providerKey)
+			cmd.Env = mergeEnvWithOverrides(scrubbed, contract.EnvVars)
 		}
 		if promptMode == "stdin" {
 			cmd.Stdin = strings.NewReader(prompt)
@@ -1183,7 +1179,7 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 			_ = copyFileContents(stdoutPath, filepath.Join(stageDir, fmt.Sprintf("stdout.state_db_failure_%d.log", stateDBAttempt)))
 			_ = copyFileContents(stderrPath, filepath.Join(stageDir, fmt.Sprintf("stderr.state_db_failure_%d.log", stateDBAttempt)))
 
-			retryEnv, retryMeta, buildErr := buildCodexIsolatedEnvWithName(stageDir, fmt.Sprintf("codex-home-retry%d", stateDBAttempt))
+			retryEnv, retryMeta, buildErr := buildCodexIsolatedEnvWithName(stageDir, fmt.Sprintf("codex-home-retry%d", stateDBAttempt), baseEnv)
 			if buildErr != nil {
 				return "", classifiedFailure(buildErr, readStderr()), nil
 			}
@@ -1217,7 +1213,7 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 			_ = copyFileContents(stdoutPath, filepath.Join(stageDir, fmt.Sprintf("stdout.timeout_failure_%d.log", timeoutAttempt)))
 			_ = copyFileContents(stderrPath, filepath.Join(stageDir, fmt.Sprintf("stderr.timeout_failure_%d.log", timeoutAttempt)))
 
-			retryEnv, retryMeta, buildErr := buildCodexIsolatedEnvWithName(stageDir, fmt.Sprintf("codex-home-timeout-retry%d", timeoutAttempt))
+			retryEnv, retryMeta, buildErr := buildCodexIsolatedEnvWithName(stageDir, fmt.Sprintf("codex-home-timeout-retry%d", timeoutAttempt), baseEnv)
 			if buildErr != nil {
 				return "", classifiedFailure(buildErr, readStderr()), nil
 			}
@@ -1305,11 +1301,16 @@ func insertPromptArg(args []string, prompt string) []string {
 	return out
 }
 
-func buildCodexIsolatedEnv(stageDir string) ([]string, map[string]any, error) {
-	return buildCodexIsolatedEnvWithName(stageDir, "codex-home")
+// buildCodexIsolatedEnv is the convenience wrapper with default home dir name.
+func buildCodexIsolatedEnv(stageDir string, baseEnv []string) ([]string, map[string]any, error) {
+	return buildCodexIsolatedEnvWithName(stageDir, "codex-home", baseEnv)
 }
 
-func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string) ([]string, map[string]any, error) {
+// buildCodexIsolatedEnvWithName applies codex-specific HOME/XDG isolation on top
+// of the provided base environment (from buildBaseNodeEnv). Toolchain paths
+// (CARGO_HOME, RUSTUP_HOME, CARGO_TARGET_DIR, etc.) are already pinned in baseEnv
+// so they survive the HOME override.
+func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string, baseEnv []string) ([]string, map[string]any, error) {
 	codexHome, err := codexIsolatedHomeDir(stageDir, homeDirName)
 	if err != nil {
 		return nil, nil, err
@@ -1327,6 +1328,9 @@ func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string) ([]strin
 
 	seeded := []string{}
 	seedErrors := []string{}
+	// Seed codex config from the ORIGINAL home (before isolation).
+	// Use os.Getenv("HOME") since baseEnv may already have HOME pinned
+	// to the original value by buildBaseNodeEnv.
 	srcHome := strings.TrimSpace(os.Getenv("HOME"))
 	if srcHome != "" {
 		for _, name := range []string{"auth.json", "config.toml"} {
@@ -1343,7 +1347,10 @@ func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string) ([]strin
 		}
 	}
 
-	env := mergeEnvWithOverrides(os.Environ(), map[string]string{
+	// Apply codex-specific overrides on top of the base env.
+	// Toolchain paths (CARGO_HOME, RUSTUP_HOME, etc.) are already pinned
+	// in baseEnv by buildBaseNodeEnv, so they survive this HOME override.
+	env := mergeEnvWithOverrides(baseEnv, map[string]string{
 		"HOME":            codexHome,
 		"CODEX_HOME":      codexStateRoot,
 		"XDG_CONFIG_HOME": xdgConfigHome,

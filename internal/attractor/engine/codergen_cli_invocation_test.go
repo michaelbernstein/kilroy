@@ -133,7 +133,7 @@ func TestBuildCodexIsolatedEnv_ConfiguresCodexScopedOverrides(t *testing.T) {
 	t.Setenv("KILROY_CODEX_STATE_BASE", stateBase)
 
 	stageDir := t.TempDir()
-	env, meta, err := buildCodexIsolatedEnv(stageDir)
+	env, meta, err := buildCodexIsolatedEnv(stageDir, os.Environ())
 	if err != nil {
 		t.Fatalf("buildCodexIsolatedEnv: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestCodexCLIInvocation_StateRootIsAbsolute(t *testing.T) {
 	t.Setenv("KILROY_CODEX_STATE_BASE", filepath.Join(wd, "state-base"))
 
 	stageDir := filepath.Join("relative", "stage")
-	_, meta, err := buildCodexIsolatedEnv(stageDir)
+	_, meta, err := buildCodexIsolatedEnv(stageDir, os.Environ())
 	if err != nil {
 		t.Fatalf("buildCodexIsolatedEnv: %v", err)
 	}
