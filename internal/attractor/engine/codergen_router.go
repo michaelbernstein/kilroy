@@ -951,7 +951,7 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		inv["codex_total_timeout_seconds"] = int(codexTotalTimeout().Seconds())
 		inv["codex_timeout_retry_max"] = codexTimeoutMaxRetries()
 	} else {
-		inv["env_mode"] = "inherit"
+		inv["env_mode"] = "base+scrub"
 		inv["env_allowlist"] = []string{"*"}
 		if scrubbed := conflictingProviderEnvKeys(providerKey); len(scrubbed) > 0 {
 			inv["env_scrubbed_keys"] = scrubbed

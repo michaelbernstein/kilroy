@@ -163,8 +163,11 @@ func TestToolHandler_UsesBaseNodeEnv(t *testing.T) {
 	if strings.Contains(output, "CLAUDECODE=1") {
 		t.Fatal("CLAUDECODE should be stripped from tool node env")
 	}
-	if !strings.Contains(output, "CARGO_TARGET_DIR=") {
-		t.Fatal("CARGO_TARGET_DIR should be set in tool node env")
+	// Check CARGO_TARGET_DIR is set to a non-empty absolute path.
+	// Note: "echo CARGO_TARGET_DIR=$CARGO_TARGET_DIR" always prints the
+	// literal prefix even when empty, so we check for "=/" (absolute path).
+	if !strings.Contains(output, "CARGO_TARGET_DIR=/") {
+		t.Fatalf("CARGO_TARGET_DIR should be set to an absolute path in tool node env; output: %s", output)
 	}
 }
 
