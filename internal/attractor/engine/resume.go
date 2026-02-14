@@ -148,7 +148,10 @@ func resumeFromLogsRoot(ctx context.Context, logsRoot string, ov ResumeOverrides
 			return nil, err
 		}
 		catalog = cat
-		backend = NewCodergenRouter(cfg, catalog)
+		backend, err = newResumeCodergenBackend(cfg, catalog)
+		if err != nil {
+			return nil, err
+		}
 
 		// Re-attach to the existing CXDB context head (metaspec required).
 		baseURL := strings.TrimSpace(ov.CXDBHTTPBaseURL)
@@ -434,6 +437,14 @@ func firstExistingPath(paths ...string) string {
 		}
 	}
 	return ""
+}
+
+func newResumeCodergenBackend(cfg *RunConfigFile, catalog *modeldb.Catalog) (CodergenBackend, error) {
+	runtimes, err := resolveProviderRuntimes(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewCodergenRouterWithRuntimes(cfg, catalog, runtimes), nil
 }
 
 func loadManifest(path string) (*manifest, error) {
