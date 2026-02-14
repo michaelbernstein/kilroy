@@ -94,6 +94,13 @@ func runProviderCLIPreflight(ctx context.Context, g *model.Graph, runtimes map[s
 		_ = writePreflightReport(opts.LogsRoot, report)
 	}()
 
+	// Validate CLI-only models: fail early if a CLI-only model (e.g.,
+	// gpt-5.3-codex-spark) is used but its provider is not configured with
+	// backend=cli.
+	if err := validateCLIOnlyModels(g, runtimes, report); err != nil {
+		return report, err
+	}
+
 	if err := runProviderAPIPreflight(ctx, g, runtimes, cfg, opts, report, catalog); err != nil {
 		return report, err
 	}
@@ -103,6 +110,46 @@ func runProviderCLIPreflight(ctx context.Context, g *model.Graph, runtimes map[s
 		return report, err
 	}
 	return report, nil
+}
+
+func validateCLIOnlyModels(g *model.Graph, runtimes map[string]ProviderRuntime, report *providerPreflightReport) error {
+	if g == nil {
+		return nil
+	}
+	for _, n := range g.Nodes {
+		if n == nil || n.Shape() != "box" {
+			continue
+		}
+		provider := normalizeProviderKey(n.Attr("llm_provider", ""))
+		modelID := strings.TrimSpace(n.Attr("llm_model", ""))
+		if modelID == "" {
+			modelID = strings.TrimSpace(n.Attr("model", ""))
+		}
+		if !isCLIOnlyModel(modelID) {
+			continue
+		}
+		rt, ok := runtimes[provider]
+		if !ok || rt.Backend != BackendCLI {
+			configuredBackend := BackendKind("none")
+			if ok {
+				configuredBackend = rt.Backend
+			}
+			report.addCheck(providerPreflightCheck{
+				Name:     "cli_only_model_backend",
+				Provider: provider,
+				Status:   preflightStatusFail,
+				Message:  fmt.Sprintf("model %s is CLI-only (no API) but provider %s is configured with backend=%s; set backend=cli in run config", modelID, provider, configuredBackend),
+			})
+			return fmt.Errorf("preflight: model %s is CLI-only but provider %s has backend=%s (requires backend=cli)", modelID, provider, configuredBackend)
+		}
+		report.addCheck(providerPreflightCheck{
+			Name:     "cli_only_model_backend",
+			Provider: provider,
+			Status:   preflightStatusPass,
+			Message:  fmt.Sprintf("CLI-only model %s: provider backend=cli confirmed", modelID),
+		})
+	}
+	return nil
 }
 
 func runProviderAPIPreflight(ctx context.Context, g *model.Graph, runtimes map[string]ProviderRuntime, cfg *RunConfigFile, opts RunOptions, report *providerPreflightReport, catalog *modeldb.Catalog) error {
