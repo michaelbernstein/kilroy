@@ -4,7 +4,7 @@
 
 **Goal:** Eliminate the environment mismatch between tool nodes and codergen nodes that causes toolchain gates to pass while downstream work nodes fail.
 
-**Architecture:** Extract a shared `buildNodeEnv` function that both `ToolHandler` and `CodergenRouter` use, ensuring all handler types see the same toolchain paths (RUSTUP_HOME, CARGO_HOME, CARGO_TARGET_DIR, etc.). Update the english-to-dotfile skill to stop generating toolchain gates that validate the wrong execution environment.
+**Architecture:** Extract a shared `buildBaseNodeEnv` function that both `ToolHandler` and `CodergenRouter` use, ensuring all handler types see the same toolchain paths (RUSTUP_HOME, CARGO_HOME, CARGO_TARGET_DIR, etc.). The skill's existing guidance (`shape=parallelogram` for toolchain gates) is architecturally correct — deterministic shell preflights belong in the tool handler, not in an LLM codergen node. The engine fix makes tool nodes use the same base environment as codergen nodes, so the shape choice becomes irrelevant to env consistency.
 
 **Tech Stack:** Go (engine), Markdown (skill)
 
@@ -31,17 +31,17 @@ Additionally, the `CARGO_TARGET_DIR` fix (commit `b7cbbc3a`) that prevents EXDEV
 
 ### Why This Is the Right Fix
 
-**Option considered: just fix the skill (make `check_toolchain` a box node).** This would make the check run in the same codex sandbox as downstream work. But it doesn't fix the underlying engine bug — any future graph that mixes tool and codergen nodes will hit the same asymmetry. It also doesn't fix the missing CARGO_TARGET_DIR for non-codex backends.
+**Option considered: just fix the skill (make `check_toolchain` a box node).** This was initially attractive but is architecturally wrong. `shape=parallelogram` is the deterministic external-tool handler per the Attractor spec — it runs a shell command and returns an exit code. Converting toolchain checks to `shape=box` (codergen/LLM handler) would turn a deterministic shell preflight into an LLM-dependent stage, contradicting the "before expensive LLM stages" intent. It also doesn't fix the underlying engine bug — any future graph that mixes tool and codergen nodes would hit the same asymmetry.
 
-**Option considered: just fix the engine (preserve toolchain paths in codex env).** This fixes the immediate Rust/cargo case but leaves the fundamental design flaw: tool nodes and codergen nodes have completely independent env construction with no shared contract. The next toolchain (Zig, Haskell, Deno, etc.) will hit the same pattern.
+**Option considered: just fix the codex CARGO_TARGET_DIR path.** This fixes the immediate Rust/cargo EXDEV case but leaves the fundamental design flaw: tool nodes and codergen nodes have completely independent env construction with no shared contract. The next toolchain (Zig, Haskell, Deno, etc.) will hit the same pattern.
 
-**The chosen approach (both engine + skill)** is the idiomatic solution because:
+**The chosen approach (engine-level shared env construction)** is the idiomatic solution because:
 
-1. **Engine: shared env construction** — a single `buildNodeEnv()` function produces a base environment that both handlers use. Toolchain-related env vars (`RUSTUP_HOME`, `CARGO_HOME`, `GOPATH`, `PATH` entries for these) are always preserved, even when HOME is overridden. `CARGO_TARGET_DIR` is set whenever a worktree is involved, not just for codex. This makes the engine's environment handling a **single code path** instead of three divergent ones.
+1. **Shared `buildBaseNodeEnv`** — a single function produces a base environment that both `ToolHandler` and `CodergenRouter` use. Toolchain-related env vars (`RUSTUP_HOME`, `CARGO_HOME`, `GOPATH`, `PATH` entries for these) are always preserved, even when HOME is overridden. `CARGO_TARGET_DIR` is set whenever a worktree is involved, not just for codex. This makes the engine's environment handling a **single code path** instead of three divergent ones.
 
-2. **Skill: toolchain gates match execution context** — the skill generates `check_toolchain` as a `shape=box` codergen node (same handler as downstream work), not a `shape=parallelogram` tool node. This ensures the gate validates the same environment the work will use. The skill also documents *why* this matters so future skill edits don't regress.
+2. **Handler semantics preserved** — `shape=parallelogram` remains the correct shape for toolchain readiness checks. The Attractor spec defines it as the deterministic shell handler, which is exactly what `command -v cargo` is. The engine fix ensures that tool nodes see the same toolchain paths as codergen nodes, so the shape choice is orthogonal to env consistency.
 
-This is belt-and-suspenders: the engine guarantees env consistency (so even if the skill used a tool node, it would still work), and the skill generates correct graphs (so even without the engine fix, the gate validates the right env).
+3. **All paths covered** — the codex isolation, non-codex CLI, and tool handler paths all start from the same base. The codex retry paths (state-DB fallback, timeout fallback) also use the base env, so CARGO_TARGET_DIR and toolchain paths cannot be dropped on retries.
 
 ---
 
@@ -281,17 +281,17 @@ func TestToolHandler_UsesBaseNodeEnv(t *testing.T) {
 	// A tool node should see pinned toolchain env vars and have CLAUDECODE stripped.
 	// We can verify by running a tool_command that echoes env vars.
 	t.Setenv("CLAUDECODE", "1")
-	worktree := t.TempDir()
 
-	dot := `digraph G {
+	dot := []byte(`digraph G {
   graph [goal="test"]
   start [shape=Mdiamond]
   exit [shape=Msquare]
   check [shape=parallelogram, tool_command="bash -c 'echo CLAUDECODE=$CLAUDECODE; echo CARGO_TARGET_DIR=$CARGO_TARGET_DIR'"]
   start -> check -> exit
-}`
-	e := newTestEngine(t, dot, worktree)
-	result, err := e.Run(context.Background())
+}`)
+	repo := initTestRepo(t)
+	logsRoot := t.TempDir()
+	result, err := Run(context.Background(), dot, RunOptions{RepoPath: repo, LogsRoot: logsRoot})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestToolHandler_UsesBaseNodeEnv(t *testing.T) {
 	}
 
 	// Read stdout to verify env was set correctly.
-	stdout, err := os.ReadFile(filepath.Join(e.Options.LogsRoot, "check", "stdout.log"))
+	stdout, err := os.ReadFile(filepath.Join(logsRoot, "check", "stdout.log"))
 	if err != nil {
 		t.Fatalf("read stdout: %v", err)
 	}
@@ -311,12 +311,10 @@ func TestToolHandler_UsesBaseNodeEnv(t *testing.T) {
 	if !strings.Contains(output, "CARGO_TARGET_DIR=") {
 		t.Fatal("CARGO_TARGET_DIR should be set in tool node env")
 	}
-	cargoTargetDir := filepath.Join(worktree, ".cargo-target")
-	if !strings.Contains(output, "CARGO_TARGET_DIR="+cargoTargetDir) {
-		t.Fatalf("CARGO_TARGET_DIR should point to worktree, got: %s", output)
-	}
 }
 ```
+
+Note: This test uses the actual `Run()` + `initTestRepo()` pattern from the engine test suite (see `engine_stage_timeout_test.go` and `run_with_config_integration_test.go:801` for examples). `initTestRepo` creates a temp git repo with an initial commit — required because `Run()` creates worktrees.
 
 **Step 2: Run test to verify it fails**
 
@@ -411,9 +409,9 @@ func TestBuildCodexIsolatedEnv_PreservesToolchainPaths(t *testing.T) {
 
 	stageDir := t.TempDir()
 	worktree := t.TempDir()
-	env, _, err := buildCodexIsolatedEnvFromBase(stageDir, buildBaseNodeEnv(worktree))
+	env, _, err := buildCodexIsolatedEnv(stageDir, buildBaseNodeEnv(worktree))
 	if err != nil {
-		t.Fatalf("buildCodexIsolatedEnvFromBase: %v", err)
+		t.Fatalf("buildCodexIsolatedEnv: %v", err)
 	}
 
 	// HOME should be overridden to isolated dir (not the original home).
@@ -444,22 +442,33 @@ func TestBuildCodexIsolatedEnv_PreservesToolchainPaths(t *testing.T) {
 **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/attractor/engine/ -run TestBuildCodexIsolatedEnv_PreservesToolchainPaths -v -count=1`
-Expected: FAIL — `buildCodexIsolatedEnvFromBase` doesn't exist yet
+Expected: FAIL — `buildCodexIsolatedEnv` doesn't exist yet
 
 **Step 3: Refactor `buildCodexIsolatedEnvWithName` to accept a base env**
 
-The key change: instead of calling `os.Environ()` and applying codex-specific overrides, `buildCodexIsolatedEnvWithName` should accept a pre-built base env (from `buildBaseNodeEnv`) and apply codex-specific overrides on top.
+The key change: instead of calling `os.Environ()` internally, `buildCodexIsolatedEnvWithName` accepts a pre-built base env (from `buildBaseNodeEnv`) and layers codex-specific overrides on top. This ensures toolchain paths survive HOME isolation on ALL paths — including retry loops.
 
-In `internal/attractor/engine/codergen_router.go`, refactor `buildCodexIsolatedEnvWithName` (lines 1312-1363):
+**All callers must be updated.** There are 3 production call sites and 3 test call sites:
+
+| File | Line | Call | Context |
+|------|------|------|---------|
+| `codergen_router.go` | 892 | `buildCodexIsolatedEnv(stageDir)` | Initial codex env construction |
+| `codergen_router.go` | 1186 | `buildCodexIsolatedEnvWithName(stageDir, "codex-home-retry%d")` | State-DB failure retry |
+| `codergen_router.go` | 1220 | `buildCodexIsolatedEnvWithName(stageDir, "codex-home-timeout-retry%d")` | Timeout failure retry |
+| `codergen_cli_invocation_test.go` | 136 | `buildCodexIsolatedEnv(stageDir)` | Test: ConfiguresCodexScopedOverrides |
+| `codergen_cli_invocation_test.go` | 222 | `buildCodexIsolatedEnv(stageDir)` | Test: RelativePathResolvesAbsolute |
+| `resume_from_restart_dir_test.go` | 65 | `buildCodexIsolatedEnvWithName(relStageDir, "codex-home")` | Test: ResumeFromRestartDir |
+
+**Important:** The retry call sites (lines 1186, 1220) are the most critical — they rebuild the codex env on each retry attempt. If these are not updated to pass a base env from `buildBaseNodeEnv`, CARGO_TARGET_DIR and toolchain paths will be dropped on retries, which is exactly the bug class we're fixing.
+
+In `internal/attractor/engine/codergen_router.go`, change the signature of `buildCodexIsolatedEnvWithName` (lines 1312-1363) to accept a base env instead of calling `os.Environ()`:
 
 ```go
-// buildCodexIsolatedEnvFromBase applies codex-specific HOME/XDG isolation on top of
-// the provided base environment (which should come from buildBaseNodeEnv).
-func buildCodexIsolatedEnvFromBase(stageDir string, baseEnv []string) ([]string, map[string]any, error) {
-	return buildCodexIsolatedEnvFromBaseWithName(stageDir, "codex-home", baseEnv)
-}
-
-func buildCodexIsolatedEnvFromBaseWithName(stageDir string, homeDirName string, baseEnv []string) ([]string, map[string]any, error) {
+// buildCodexIsolatedEnvWithName applies codex-specific HOME/XDG isolation on top
+// of the provided base environment (from buildBaseNodeEnv). Toolchain paths
+// (CARGO_HOME, RUSTUP_HOME, CARGO_TARGET_DIR, etc.) are already pinned in baseEnv
+// so they survive the HOME override.
+func buildCodexIsolatedEnvWithName(stageDir string, homeDirName string, baseEnv []string) ([]string, map[string]any, error) {
 	codexHome, err := codexIsolatedHomeDir(stageDir, homeDirName)
 	if err != nil {
 		return nil, nil, err
@@ -477,11 +486,10 @@ func buildCodexIsolatedEnvFromBaseWithName(stageDir string, homeDirName string, 
 
 	seeded := []string{}
 	seedErrors := []string{}
-	// Use the ORIGINAL home (from base env) for seeding codex config files.
-	srcHome := envLookupSlice(baseEnv, "ORIGINAL_HOME")
-	if srcHome == "" {
-		srcHome = strings.TrimSpace(os.Getenv("HOME"))
-	}
+	// Seed codex config from the ORIGINAL home (before isolation).
+	// Use os.Getenv("HOME") since baseEnv may already have HOME pinned
+	// to the original value by buildBaseNodeEnv.
+	srcHome := strings.TrimSpace(os.Getenv("HOME"))
 	if srcHome != "" {
 		for _, name := range []string{"auth.json", "config.toml"} {
 			src := filepath.Join(srcHome, ".codex", name)
@@ -518,17 +526,21 @@ func buildCodexIsolatedEnvFromBaseWithName(stageDir string, homeDirName string, 
 	}
 	return env, meta, nil
 }
+
+// buildCodexIsolatedEnv is the convenience wrapper with default home dir name.
+func buildCodexIsolatedEnv(stageDir string, baseEnv []string) ([]string, map[string]any, error) {
+	return buildCodexIsolatedEnvWithName(stageDir, "codex-home", baseEnv)
+}
 ```
 
-Note: `envLookupSlice` is a helper to look up a key in an `[]string` env slice (similar to `envLookup` used in tests — check if it already exists or add it).
+Then update **all 3 production call sites** to pass `baseEnv`:
 
-Then update the callsite in `runCLI` (around line 890-905):
-
+**Call site 1** — initial codex env (line 892):
 ```go
 if codexSemantics {
 	var err error
 	baseEnv := buildBaseNodeEnv(execCtx.WorktreeDir)
-	isolatedEnv, isolatedMeta, err = buildCodexIsolatedEnvFromBase(stageDir, baseEnv)
+	isolatedEnv, isolatedMeta, err = buildCodexIsolatedEnv(stageDir, baseEnv)
 	if err != nil {
 		return "", classifiedFailure(err, ""), nil
 	}
@@ -537,8 +549,20 @@ if codexSemantics {
 }
 ```
 
-And the non-codex path (around line 994-996):
+**Call site 2** — state-DB retry (line 1186):
+```go
+retryEnv, retryMeta, buildErr := buildCodexIsolatedEnvWithName(
+	stageDir, fmt.Sprintf("codex-home-retry%d", stateDBAttempt), baseEnv)
+```
+Note: `baseEnv` must be computed once before the retry loop and reused. Hoist the `baseEnv := buildBaseNodeEnv(execCtx.WorktreeDir)` above the retry loops so both retry paths can reference it.
 
+**Call site 3** — timeout retry (line 1220):
+```go
+retryEnv, retryMeta, buildErr := buildCodexIsolatedEnvWithName(
+	stageDir, fmt.Sprintf("codex-home-timeout-retry%d", timeoutAttempt), baseEnv)
+```
+
+**Non-codex path** (line 994-996):
 ```go
 } else {
 	baseEnv := buildBaseNodeEnv(execCtx.WorktreeDir)
@@ -547,7 +571,10 @@ And the non-codex path (around line 994-996):
 }
 ```
 
-Keep the old `buildCodexIsolatedEnv` and `buildCodexIsolatedEnvWithName` functions as thin wrappers that call the new `FromBase` variants (to avoid breaking any other callers or tests), OR update all callers. Check for callers with `grep -rn buildCodexIsolatedEnv` first.
+**Test call sites** — update all 3 to pass `os.Environ()` (tests don't need toolchain pinning, but the signature must match):
+- `codergen_cli_invocation_test.go:136` → `buildCodexIsolatedEnv(stageDir, os.Environ())`
+- `codergen_cli_invocation_test.go:222` → `buildCodexIsolatedEnv(stageDir, os.Environ())`
+- `resume_from_restart_dir_test.go:65` → `buildCodexIsolatedEnvWithName(relStageDir, "codex-home", os.Environ())`
 
 **Step 4: Run test to verify it passes**
 
@@ -577,104 +604,15 @@ buildBaseNodeEnv handles it for all handlers.
 
 The codex isolation now layers on top of the base env:
   os.Environ() -> buildBaseNodeEnv (pin toolchains, strip CLAUDECODE,
-  set CARGO_TARGET_DIR) -> buildCodexIsolatedEnvFromBase (override
-  HOME, XDG_*, seed codex config files)"
+  set CARGO_TARGET_DIR) -> buildCodexIsolatedEnv(baseEnv)
+  (override HOME, XDG_*, seed codex config files)"
 ```
 
 ---
 
-### Task 4: Update the english-to-dotfile skill to generate toolchain gates correctly
+### Task 4: Run full test suite and verify end-to-end
 
-The skill's Phase 3 "Toolchain bootstrap" section instructs generating `check_toolchain` as `shape=parallelogram` (tool handler). This should be `shape=box` (codergen handler) so the gate runs in the same execution context as downstream work nodes.
-
-**Files:**
-- Modify: `skills/english-to-dotfile/SKILL.md` (3 locations)
-
-**Step 1: Update the toolchain bootstrap section (around lines 398-408)**
-
-Find the example DOT readiness gate:
-```dot
-check_toolchain [
-    shape=parallelogram,
-    max_retries=0,
-    tool_command="bash -lc 'set -euo pipefail; command -v cargo >/dev/null || { echo \"missing required tool: cargo\" >&2; exit 1; }; command -v wasm-pack >/dev/null || { echo \"missing required tool: wasm-pack\" >&2; exit 1; }'"
-]
-```
-
-Replace with:
-```dot
-check_toolchain [
-    shape=box,
-    max_retries=0,
-    prompt="Check that all required build tools are installed and working.\n\nRun:\n  command -v cargo || { echo 'missing: cargo — install from https://rustup.rs' >&2; exit 1; }\n  command -v wasm-pack || { echo 'missing: wasm-pack — install with: cargo install wasm-pack' >&2; exit 1; }\n  rustup target list --installed | grep -q wasm32-unknown-unknown || { echo 'missing: wasm32-unknown-unknown target — install with: rustup target add wasm32-unknown-unknown' >&2; exit 1; }\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH (absolute path), fallback to $KILROY_STAGE_STATUS_FALLBACK_PATH, and do not write nested status.json files.\nWrite status JSON: outcome=success if all tools found, outcome=fail with failure_reason=toolchain_missing and details listing missing tools."
-]
-```
-
-**Step 2: Update the description text (around line 368)**
-
-Find:
-```
-3. Always add an early DOT readiness gate (`shape=parallelogram` `tool_command`) to fail fast with actionable errors.
-```
-
-Replace with:
-```
-3. Always add an early DOT readiness gate (`shape=box` codergen node) to fail fast with actionable errors. Use `shape=box` (not `shape=parallelogram`) so the gate runs in the same execution environment as downstream work nodes — a `shape=parallelogram` tool node inherits the host environment, which may differ from the codex sandbox environment where implementation nodes execute.
-```
-
-**Step 3: Update anti-pattern #20 (around line 958)**
-
-Find:
-```
-20. **Missing toolchain readiness gates for non-default build dependencies.** If the deliverable needs tools that are often absent (for example `wasm-pack`, Playwright browsers, mobile SDKs), add an early `shape=parallelogram` tool node that checks prerequisites and blocks the pipeline before expensive LLM stages.
-```
-
-Replace with:
-```
-20. **Missing toolchain readiness gates for non-default build dependencies.** If the deliverable needs tools that are often absent (for example `wasm-pack`, Playwright browsers, mobile SDKs), add an early `shape=box` codergen node that checks prerequisites and blocks the pipeline before expensive LLM stages. Use `shape=box` (not `shape=parallelogram`) so the gate validates the same execution environment as downstream work nodes.
-```
-
-**Step 4: Add new anti-pattern #33**
-
-After anti-pattern #32, add:
-
-```
-33. **Toolchain gates as tool nodes (`shape=parallelogram`).** Do NOT use `shape=parallelogram` for toolchain readiness checks. Tool nodes inherit the host process environment, but codergen nodes (where the actual work happens) may run in an isolated environment with different HOME/PATH. A `check_toolchain` tool node can find `cargo` on the host while the downstream `implement` codex node can't. Use `shape=box` for toolchain gates so they validate the same environment the work will use.
-```
-
-**Step 5: Update DSL quick reference table if needed**
-
-Check the `parallelogram` row in the DSL table. It currently says:
-```
-| `parallelogram` | tool | Shell command execution (uses `tool_command` attribute). |
-```
-
-Add a note. Find the parallelogram row and update to:
-```
-| `parallelogram` | tool | Shell command execution (uses `tool_command` attribute). **Not for toolchain checks** — use `box` instead so the check runs in the same env as downstream codergen nodes. |
-```
-
-**Step 6: Commit**
-
-```bash
-git add skills/english-to-dotfile/SKILL.md
-git commit -m "fix(skill): generate toolchain gates as box nodes, not parallelogram
-
-Tool nodes (shape=parallelogram) inherit the host process env, but
-codergen nodes (shape=box) may run in an isolated codex sandbox with
-a different HOME. This caused check_toolchain to pass while downstream
-implement/verify failed with rust_toolchain_unavailable.
-
-Changes:
-- Toolchain bootstrap example: shape=parallelogram -> shape=box
-- Anti-pattern #20: updated to recommend shape=box
-- Anti-pattern #33: new, warns against parallelogram toolchain gates
-- DSL quick reference: note on parallelogram row"
-```
-
----
-
-### Task 5: Run full test suite and verify end-to-end
+No skill changes are needed. The engine fix (Tasks 1-3) ensures all handler types use the same base environment, so `shape=parallelogram` toolchain gates now correctly validate the same toolchain paths as downstream `shape=box` codergen nodes. The skill's existing guidance is architecturally correct: `parallelogram` is the deterministic shell handler, which is the right handler for `command -v cargo`.
 
 **Step 1: Run full engine tests**
 
@@ -690,17 +628,29 @@ go run ./cmd/kilroy attractor validate --graph docs/strongdm/dot\ specs/consensu
 ```
 Expected: Both pass (or same warnings as before — no new errors)
 
-**Step 3: Verify no references to old pattern remain in skill**
-
-Run: `grep -n 'shape=parallelogram.*tool_command.*command -v' skills/english-to-dotfile/SKILL.md`
-Expected: No matches (the old pattern is replaced)
-
-**Step 4: Verify new env function is used by both handlers**
+**Step 3: Verify new env function is used by both handlers**
 
 Run: `grep -n 'buildBaseNodeEnv' internal/attractor/engine/handlers.go internal/attractor/engine/codergen_router.go`
 Expected: Both files reference `buildBaseNodeEnv`
 
-**Step 5: Commit (if any fixups needed)**
+**Step 4: Verify all codex retry paths pass base env**
+
+Run: `grep -n 'buildCodexIsolatedEnv' internal/attractor/engine/codergen_router.go`
+Expected: All call sites pass `baseEnv` as a parameter (no calls to the old no-baseEnv signature)
+
+**Step 5: Verify `reference_template.dot` is consistent**
+
+The template-first workflow uses `skills/english-to-dotfile/reference_template.dot`. Verify it uses `shape=parallelogram` for `check_toolchain` (which is correct — the engine fix ensures tool nodes see the same env):
+
+Run: `grep -A2 'check_toolchain' skills/english-to-dotfile/reference_template.dot`
+Expected: `shape=parallelogram` with `tool_command`
+
+**Step 6: Verify skill guidance is consistent**
+
+Run: `grep -n 'shape=parallelogram' skills/english-to-dotfile/SKILL.md | head -5`
+Expected: Skill recommends `shape=parallelogram` for toolchain gates (anti-pattern #20, toolchain bootstrap section). This is correct — no changes needed.
+
+**Step 7: Commit (if any fixups needed)**
 
 Only if fixes were needed. Otherwise this task is just verification.
 
@@ -710,11 +660,12 @@ Only if fixes were needed. Otherwise this task is just verification.
 
 - [ ] `buildBaseNodeEnv` is called by ToolHandler (handlers.go)
 - [ ] `buildBaseNodeEnv` is called by CodergenRouter for both codex and non-codex paths
+- [ ] `buildBaseNodeEnv` is passed to ALL codex retry paths (state-DB retry line 1186, timeout retry line 1220)
 - [ ] CARGO_HOME, RUSTUP_HOME pinned to absolute values in all handler types
 - [ ] CARGO_TARGET_DIR set for all handler types (not just codex)
 - [ ] CLAUDECODE stripped for all handler types (not just via `conflictingProviderEnvKeys`)
 - [ ] Tool nodes log `env_mode: "base"` (not `"inherit"`)
-- [ ] Skill generates `check_toolchain` as `shape=box`, not `shape=parallelogram`
-- [ ] Anti-pattern #33 documents the pitfall
-- [ ] All existing tests pass
+- [ ] `reference_template.dot` keeps `check_toolchain` as `shape=parallelogram` (correct — engine ensures env consistency)
+- [ ] Skill keeps `shape=parallelogram` guidance for toolchain gates (correct — deterministic shell handler)
+- [ ] All existing tests pass (including updated test call sites)
 - [ ] New tests cover: toolchain preservation, CARGO_TARGET_DIR, CLAUDECODE stripping, codex HOME override doesn't break toolchain paths
