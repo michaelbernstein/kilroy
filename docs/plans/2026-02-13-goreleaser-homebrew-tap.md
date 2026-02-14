@@ -91,9 +91,9 @@ Expected: `kilroy 0.99.0`
 
 ---
 
-### Task 3: Add a test for `--version` output
+### Task 3: Add a test for the Version variable default
 
-The `--version` flag output changes from `0.0.0` to `dev`. Add test coverage.
+The `Version` variable changes from `const "0.0.0"` to `var "dev"`. Add a test that the default is `"dev"` in test builds (goreleaser overrides it via ldflags at release time). This ensures the variable isn't accidentally changed to an empty string or wrong default.
 
 **Files:**
 - Create: `internal/version/version_test.go`
@@ -292,10 +292,12 @@ git commit -m "feat(release): add goreleaser config, GitHub Actions workflow, an
 - internal/version/version.go: change const to var so goreleaser can
   inject the version from the git tag via ldflags. Default is 'dev'
   for local builds.
-- internal/version/version_test.go: test that Version is non-empty.
+- internal/version/version_test.go: assert Version == 'dev' in test
+  builds (goreleaser overrides via ldflags at release time).
 - .goreleaser.yaml: cross-platform builds (linux/darwin/windows x
-  amd64/arm64), Homebrew tap (danshapiro/homebrew-kilroy), hand-crafted
-  release notes via --release-notes flag.
+  amd64/arm64), Homebrew tap (danshapiro/homebrew-kilroy), changelog
+  disabled (hand-crafted release notes passed via --release-notes flag
+  in the GitHub Actions workflow).
 - .github/workflows/release.yml: triggered on v* tag push, validates
   config, runs tests, then goreleaser. Uses HOMEBREW_TAP_GITHUB_TOKEN
   secret for tap push.
