@@ -21,8 +21,15 @@ The module path in `go.mod` is `github.com/strongdm/kilroy` but the repo lives a
 
 ```bash
 cd /home/user/code/kilroy/.worktrees/release-skill
-find . -type f \( -name '*.go' -o -name 'go.mod' -o -name '*.md' \) \
+# Rewrite Go source and go.mod (the actual module path references)
+find . -type f \( -name '*.go' -o -name 'go.mod' \) \
   -not -path './.git/*' -not -path './.worktrees/*' \
+  -exec sed -i 's|github\.com/strongdm/kilroy|github.com/danshapiro/kilroy|g' {} +
+# Rewrite doc plan files (code snippets referencing the module path),
+# but skip THIS plan file since it references both old and new paths
+# in its verification steps.
+find ./docs/plans -name '*.md' \
+  -not -name '2026-02-13-goreleaser-homebrew-tap.md' \
   -exec sed -i 's|github\.com/strongdm/kilroy|github.com/danshapiro/kilroy|g' {} +
 ```
 
@@ -38,8 +45,16 @@ Expected: `kilroy 0.0.0`
 
 **Step 4: Run the full test suite**
 
-Run: `go test ./...`
-Expected: all packages pass (engine tests may fail — this is a pre-existing issue on clean HEAD, not caused by the rename)
+First, capture the pre-existing test state BEFORE the rename to establish a baseline:
+
+Run: `go test ./... 2>&1 | grep '^---' | sort > /tmp/kilroy-test-baseline-before.txt`
+
+Then, after the rename, run the full suite and compare:
+
+Run: `go test ./... 2>&1 | grep '^---' | sort > /tmp/kilroy-test-baseline-after.txt`
+Run: `diff /tmp/kilroy-test-baseline-before.txt /tmp/kilroy-test-baseline-after.txt`
+
+Expected: the diff is empty (same test results before and after). If new failures appear that were not in the baseline, the rename introduced a regression — investigate before continuing.
 
 **Step 5: Verify no leftover references**
 
