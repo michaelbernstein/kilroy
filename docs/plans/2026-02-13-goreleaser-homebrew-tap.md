@@ -17,10 +17,18 @@ The module path in `go.mod` is `github.com/strongdm/kilroy` but the repo lives a
 **Files:**
 - Modify: all files containing `github.com/strongdm/kilroy` (go.mod, Go source, docs/plans)
 
-**Step 1: Run the global replacement**
+**Step 1: Capture pre-rename test baseline**
+
+Run this BEFORE making any changes to establish which tests pass/fail at HEAD:
 
 ```bash
 cd /home/user/code/kilroy/.worktrees/release-skill
+go test ./... 2>&1 | grep -E '^(ok|FAIL)' | sort > /tmp/kilroy-test-baseline-before.txt
+```
+
+**Step 2: Run the global replacement**
+
+```bash
 # Rewrite Go source and go.mod (the actual module path references)
 find . -type f \( -name '*.go' -o -name 'go.mod' \) \
   -not -path './.git/*' -not -path './.worktrees/*' \
@@ -33,33 +41,31 @@ find ./docs/plans -name '*.md' \
   -exec sed -i 's|github\.com/strongdm/kilroy|github.com/danshapiro/kilroy|g' {} +
 ```
 
-**Step 2: Verify it compiles**
+**Step 3: Verify it compiles**
 
 Run: `go build -o ./kilroy ./cmd/kilroy`
 Expected: exits 0, no errors
 
-**Step 3: Verify version flag still works**
+**Step 4: Verify version flag still works**
 
 Run: `./kilroy --version`
 Expected: `kilroy 0.0.0`
 
-**Step 4: Run the full test suite**
+**Step 5: Run the full test suite and compare to baseline**
 
-First, capture the pre-existing test state BEFORE the rename to establish a baseline:
+```bash
+go test ./... 2>&1 | grep -E '^(ok|FAIL)' | sort > /tmp/kilroy-test-baseline-after.txt
+diff /tmp/kilroy-test-baseline-before.txt /tmp/kilroy-test-baseline-after.txt
+```
 
-Run: `go test ./... 2>&1 | grep '^---' | sort > /tmp/kilroy-test-baseline-before.txt`
+Expected: the diff is empty (identical package-level pass/fail results before and after). If new `FAIL` lines appear or `ok` lines disappear, the rename introduced a regression — investigate before continuing.
 
-Then, after the rename, run the full suite and compare:
+**Step 6: Verify no leftover references in compiled code**
 
-Run: `go test ./... 2>&1 | grep '^---' | sort > /tmp/kilroy-test-baseline-after.txt`
-Run: `diff /tmp/kilroy-test-baseline-before.txt /tmp/kilroy-test-baseline-after.txt`
-
-Expected: the diff is empty (same test results before and after). If new failures appear that were not in the baseline, the rename introduced a regression — investigate before continuing.
-
-**Step 5: Verify no leftover references**
-
-Run: `grep -r 'github\.com/strongdm/kilroy' --include='*.go' --include='*.md' --include='go.mod' . | grep -v '.git/' | grep -v '.worktrees/'`
+Run: `grep -r 'github\.com/strongdm/kilroy' --include='*.go' --include='go.mod' . | grep -v '.git/' | grep -v '.worktrees/'`
 Expected: no output
+
+Note: this plan file (`docs/plans/2026-02-13-goreleaser-homebrew-tap.md`) intentionally retains references to the old path in its verification steps. It is excluded from the sed replacement and from this check.
 
 **Step 6: Commit**
 
@@ -493,5 +499,5 @@ After all tasks are complete:
 1. `./kilroy --version` prints `kilroy dev`
 2. `go build -ldflags "-X github.com/danshapiro/kilroy/internal/version.Version=0.1.0" -o ./kilroy ./cmd/kilroy && ./kilroy --version` prints `kilroy 0.1.0`
 3. `goreleaser check` (if installed) reports valid config
-4. `grep -r 'strongdm/kilroy' --include='*.go' --include='go.mod' --include='*.md' .` returns nothing
+4. `grep -r 'strongdm/kilroy' --include='*.go' --include='go.mod' .` returns nothing (exclude `*.md` since this plan file intentionally retains old-path references)
 5. `.github/workflows/release.yml` exists and is valid YAML
