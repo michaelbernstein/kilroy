@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +16,11 @@ import (
 	"github.com/danshapiro/kilroy/internal/attractor/engine"
 	"github.com/danshapiro/kilroy/internal/providerspec"
 	"github.com/danshapiro/kilroy/internal/version"
+)
+
+const (
+	skipCLIHeadlessWarningFlag = "--skip-cli-headless-warning"
+	cliHeadlessWarningPrompt   = "Some providers, notably Anthropic, have unclear guidance about using the CLI headlessly like this, There is a risk that your account could be suspended. Proceed? Y/n: "
 )
 
 func signalCancelContext() (context.Context, func()) {
@@ -101,6 +109,7 @@ func attractorRun(args []string) {
 	var detach bool
 	var allowTestShim bool
 	var confirmStaleBuild bool
+	var skipCLIHeadlessWarning bool
 	var forceModelSpecs []string
 
 	for i := 0; i < len(args); i++ {
@@ -111,6 +120,8 @@ func attractorRun(args []string) {
 			allowTestShim = true
 		case "--confirm-stale-build":
 			confirmStaleBuild = true
+		case skipCLIHeadlessWarningFlag:
+			skipCLIHeadlessWarning = true
 		case "--force-model":
 			i++
 			if i >= len(args) {
@@ -167,6 +178,18 @@ func attractorRun(args []string) {
 	}
 
 	if detach {
+		cfg, err := engine.LoadRunConfigFile(configPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if !skipCLIHeadlessWarning && runConfigUsesCLIProviders(cfg) {
+			if !confirmCLIHeadlessWarning(os.Stdin, os.Stderr) {
+				fmt.Fprintln(os.Stderr, "preflight aborted: declined provider CLI headless-risk warning")
+				os.Exit(1)
+			}
+		}
+
 		if runID == "" {
 			id, err := engine.NewRunID()
 			if err != nil {
@@ -205,6 +228,7 @@ func attractorRun(args []string) {
 		if confirmStaleBuild {
 			childArgs = append(childArgs, "--confirm-stale-build")
 		}
+		childArgs = append(childArgs, skipCLIHeadlessWarningFlag)
 		for _, spec := range canonicalForceSpecs {
 			childArgs = append(childArgs, "--force-model", spec)
 		}
@@ -226,6 +250,12 @@ func attractorRun(args []string) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	if !skipCLIHeadlessWarning && runConfigUsesCLIProviders(cfg) {
+		if !confirmCLIHeadlessWarning(os.Stdin, os.Stderr) {
+			fmt.Fprintln(os.Stderr, "preflight aborted: declined provider CLI headless-risk warning")
+			os.Exit(1)
+		}
 	}
 
 	// Default: no deadline. CLI runs (especially with provider CLIs) can take hours.
@@ -317,6 +347,38 @@ func normalizeRunProviderKey(provider string) string {
 func isSupportedForceModelProvider(provider string) bool {
 	_, ok := providerspec.Builtin(provider)
 	return ok
+}
+
+func runConfigUsesCLIProviders(cfg *engine.RunConfigFile) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, providerCfg := range cfg.LLM.Providers {
+		if providerCfg.Backend == engine.BackendCLI {
+			return true
+		}
+	}
+	return false
+}
+
+func confirmCLIHeadlessWarning(in io.Reader, out io.Writer) bool {
+	if in == nil {
+		in = os.Stdin
+	}
+	if out == nil {
+		out = os.Stderr
+	}
+	_, _ = io.WriteString(out, cliHeadlessWarningPrompt)
+	s, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false
+	}
+	answer := strings.ToLower(strings.TrimSpace(s))
+	// Y/n defaults to yes.
+	if answer == "" {
+		return true
+	}
+	return answer == "y" || answer == "yes"
 }
 
 func supportedForceModelProvidersCSV() string {

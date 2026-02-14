@@ -431,6 +431,26 @@ func runKilroy(t *testing.T, bin string, args ...string) (exitCode int, stdoutSt
 	return ee.ExitCode(), string(out)
 }
 
+func runKilroyWithInput(t *testing.T, bin string, input string, args ...string) (exitCode int, stdoutStderr string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("kilroy timed out\n%s", string(out))
+	}
+	if err == nil {
+		return 0, string(out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("kilroy failed: %v\n%s", err, string(out))
+	}
+	return ee.ExitCode(), string(out)
+}
+
 func runKilroyInDir(t *testing.T, dir string, bin string, args ...string) (exitCode int, stdoutStderr string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -731,6 +751,102 @@ modeldb:
 	}
 	if !strings.Contains(out, "llm.cli_profile=real forbids provider path overrides") {
 		t.Fatalf("expected real profile override rejection, got:\n%s", out)
+	}
+}
+
+func TestAttractorRun_CLIProviderWarningCanAbortPreflight(t *testing.T) {
+	bin := buildKilroyBinary(t)
+	repo := initTestRepo(t)
+	catalog := writePinnedCatalog(t)
+
+	graph := filepath.Join(t.TempDir(), "openai.dot")
+	_ = os.WriteFile(graph, []byte(`
+digraph G {
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
+  a [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="hi"]
+  start -> a -> exit
+}
+`), 0o644)
+
+	cfg := filepath.Join(t.TempDir(), "run.yaml")
+	_ = os.WriteFile(cfg, []byte(fmt.Sprintf(`
+version: 1
+repo:
+  path: %s
+cxdb:
+  binary_addr: 127.0.0.1:9009
+  http_base_url: http://127.0.0.1:9010
+llm:
+  cli_profile: real
+  providers:
+    openai:
+      backend: cli
+modeldb:
+  openrouter_model_info_path: %s
+  openrouter_model_info_update_policy: pinned
+`, repo, catalog)), 0o644)
+
+	logsRoot := filepath.Join(t.TempDir(), "logs")
+	code, out := runKilroyWithInput(t, bin, "n\n", "attractor", "run", "--graph", graph, "--config", cfg, "--run-id", "cli-warning-abort", "--logs-root", logsRoot)
+	if code != 1 {
+		t.Fatalf("exit code: got %d want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, cliHeadlessWarningPrompt) {
+		t.Fatalf("expected cli headless warning prompt, got:\n%s", out)
+	}
+	if !strings.Contains(out, "preflight aborted: declined provider CLI headless-risk warning") {
+		t.Fatalf("expected explicit preflight abort message, got:\n%s", out)
+	}
+}
+
+func TestAttractorRun_CLIProviderWarningDefaultsToProceedOnEnter(t *testing.T) {
+	bin := buildKilroyBinary(t)
+	repo := initTestRepo(t)
+	catalog := writePinnedCatalog(t)
+	t.Setenv("KILROY_CODEX_PATH", "/tmp/fake/codex")
+
+	graph := filepath.Join(t.TempDir(), "openai.dot")
+	_ = os.WriteFile(graph, []byte(`
+digraph G {
+  start [shape=Mdiamond]
+  exit [shape=Msquare]
+  a [shape=box, llm_provider=openai, llm_model=gpt-5.2, prompt="hi"]
+  start -> a -> exit
+}
+`), 0o644)
+
+	cfg := filepath.Join(t.TempDir(), "run.yaml")
+	_ = os.WriteFile(cfg, []byte(fmt.Sprintf(`
+version: 1
+repo:
+  path: %s
+cxdb:
+  binary_addr: 127.0.0.1:9009
+  http_base_url: http://127.0.0.1:9010
+llm:
+  cli_profile: real
+  providers:
+    openai:
+      backend: cli
+modeldb:
+  openrouter_model_info_path: %s
+  openrouter_model_info_update_policy: pinned
+`, repo, catalog)), 0o644)
+
+	logsRoot := filepath.Join(t.TempDir(), "logs")
+	code, out := runKilroyWithInput(t, bin, "\n", "attractor", "run", "--graph", graph, "--config", cfg, "--run-id", "cli-warning-proceed", "--logs-root", logsRoot)
+	if code != 1 {
+		t.Fatalf("exit code: got %d want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, cliHeadlessWarningPrompt) {
+		t.Fatalf("expected cli headless warning prompt, got:\n%s", out)
+	}
+	if strings.Contains(out, "preflight aborted: declined provider CLI headless-risk warning") {
+		t.Fatalf("prompt should default to proceed on Enter, got:\n%s", out)
+	}
+	if !strings.Contains(out, "llm.cli_profile=real forbids provider path overrides") {
+		t.Fatalf("expected run to continue into preflight policy checks, got:\n%s", out)
 	}
 }
 
