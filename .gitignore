@@ -10,3 +10,6 @@
 /status.json
 /tmp/
 /logs/
+
+# GoReleaser build output
+/dist/

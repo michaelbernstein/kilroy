@@ -1,0 +1,60 @@
+version: 2
+
+project_name: kilroy
+
+builds:
+  - id: kilroy
+    main: ./cmd/kilroy
+    binary: kilroy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/danshapiro/kilroy/internal/version.Version={{.Version}}
+      - -X main.embeddedBuildRevision={{.FullCommit}}
+
+archives:
+  - id: default
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true
+
+# NOTE: `brews` is the current goreleaser v2 config key for Homebrew formulas.
+# If goreleaser deprecates it in favor of a new key, it will warn at release
+# time. Update the key name if that happens.
+brews:
+  - name: kilroy
+    repository:
+      owner: danshapiro
+      name: homebrew-kilroy
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/danshapiro/kilroy"
+    description: "Local-first CLI for running Attractor pipelines in a git repo"
+    license: "MIT"
+    install: |
+      bin.install "kilroy"
+    test: |
+      system "#{bin}/kilroy", "--version"
+
+release:
+  github:
+    owner: danshapiro
+    name: kilroy
+  draft: false
+  prerelease: auto
