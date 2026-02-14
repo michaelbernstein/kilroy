@@ -1,28 +1,28 @@
 ---
 name: investigating-kilroy-runs
-description: "Diagnose active, stuck, or failed Kilroy Attractor runs by inspecting run artifacts (`manifest.json`, `live.json`, `checkpoint.json`, `final.json`, `progress.ndjson`), resolving run IDs/log roots, identifying model/provider routing, and isolating failure causes. Includes CXDB operations: launch/probe CXDB, open the CXDB UI, and query run context turns. Use when asked to investigate run status, debug retries/failures, explain model usage, or inspect CXDB-backed event history."
+description: "To diagnose active, stuck, or failed Kilroy Attractor runs, inspect run artifacts (`manifest.json`, `live.json`, `checkpoint.json`, `final.json`, `progress.ndjson`), resolve run IDs/log roots, identify model/provider routing, and isolate failure causes. Includes CXDB operations for launching/probing CXDB, opening the CXDB UI, and querying run context turns. This skill is useful when investigating run status, debugging retries/failures, explaining model usage, or inspecting CXDB-backed event history."
 ---
 
 # Investigating Kilroy Runs
 
-Use this workflow to inspect a run quickly and produce a precise status report.
+To inspect a run quickly and produce a precise diagnosis, follow this workflow.
 
 ## Resolve Run Root
 
-1. Prefer an explicit `--logs-root` path if provided.
-2. Otherwise find the newest run under `~/.local/state/kilroy/attractor/runs`.
-3. Treat that directory as `RUN_ROOT`.
+1. To resolve run root with highest confidence, start from an explicit `--logs-root` path when provided.
+2. To infer run root when no path is provided, locate the newest run under `~/.local/state/kilroy/attractor/runs`.
+3. To keep later commands consistent, treat that directory as `RUN_ROOT`.
 
 ```bash
 RUNS="$HOME/.local/state/kilroy/attractor/runs"
-RUN_ID="$(find "$RUNS" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr | head -n1 | awk '{print $2}')"
+RUN_ID="$(find "$RUNS" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr | awk 'NR==1 {id=$2} END {print id}')"
 RUN_ROOT="$RUNS/$RUN_ID"
 echo "$RUN_ID"
 ```
 
 ## CXDB: Launch, UI, and Query
 
-Resolve CXDB fields from run metadata first:
+To get CXDB connection details, extract the fields from run metadata first:
 
 ```bash
 CXDB_URL="$(jq -r '.cxdb.http_base_url' "$RUN_ROOT/manifest.json")"
@@ -30,27 +30,27 @@ CONTEXT_ID="$(jq -r '.cxdb.context_id' "$RUN_ROOT/manifest.json")"
 echo "cxdb_url=$CXDB_URL context_id=$CONTEXT_ID"
 ```
 
-Start/probe CXDB and print UI endpoint:
+To make sure CXDB is available and to print the UI endpoint, run:
 
 ```bash
 ./scripts/start-cxdb.sh
 ./scripts/start-cxdb-ui.sh
 ```
 
-Open UI in a browser when needed:
+To open the CXDB UI in a browser when needed, run:
 
 ```bash
 KILROY_CXDB_OPEN_UI=1 ./scripts/start-cxdb-ui.sh
 ```
 
-Follow run events directly from CXDB (preferred for live runs):
+To follow run events directly from CXDB:
 
 ```bash
 ./kilroy attractor status --logs-root "$RUN_ROOT" --follow --cxdb
 ./kilroy attractor status --logs-root "$RUN_ROOT" --follow --cxdb --raw
 ```
 
-Direct HTTP queries (for ad-hoc debugging):
+To run direct HTTP queries for ad-hoc debugging, use:
 
 ```bash
 # Health endpoint may be /healthz even when /health returns 404.
@@ -63,7 +63,7 @@ curl -fsS "$CXDB_URL/v1/contexts/$CONTEXT_ID/turns?view=typed&limit=20"
 
 ## Read Canonical Files
 
-Inspect files in this order:
+To build a reliable picture of run state:
 
 1. `manifest.json`: run identity, graph name, repo, worktree, `started_at`.
 2. `live.json`: most recent event.
@@ -81,22 +81,97 @@ tail -n 80 "$RUN_ROOT/progress.ndjson"
 
 ## Determine Current State
 
-Classify run state:
+To classify run state:
 
 - Running: `final.json` missing and `live.json`/`progress.ndjson` still changing.
 - Finished: `final.json` present.
 - Likely stalled: no `progress.ndjson` updates for longer than configured stall timeout.
 
-Useful checks:
+To quickly validate terminal state vs liveness, use:
 
 ```bash
 ls -la "$RUN_ROOT/final.json"
 tail -n 1 "$RUN_ROOT/progress.ndjson"
 ```
 
+## Discover Event Schema First
+
+To avoid filtering for non-existent event keys, discover the active event schema before building event-specific queries:
+
+```bash
+jq -r '.event // empty' "$RUN_ROOT/progress.ndjson" | sort | uniq -c | sort -nr
+```
+
+To inspect fields for a specific event type, run:
+
+```bash
+jq -c 'select(.event=="stage_attempt_end")' "$RUN_ROOT/progress.ndjson" | head -n 5
+```
+
+## Resolve Terminal-vs-Live Conflicts
+
+To handle cases where `final.json` exists but `progress.ndjson` still changes:
+
+1. Treat this as a possible resume/overlap situation rather than immediate data corruption.
+2. Compare file mtimes and latest event timestamps.
+3. Confirm whether a `run`/`resume` process is currently active.
+
+```bash
+stat -c '%n %y' "$RUN_ROOT/final.json" "$RUN_ROOT/live.json" "$RUN_ROOT/progress.ndjson" 2>/dev/null
+tail -n 5 "$RUN_ROOT/progress.ndjson"
+```
+
+## Check Process Liveness
+
+To determine whether the run is truly active at the OS level:
+
+```bash
+[ -f "$RUN_ROOT/run.pid" ] && cat "$RUN_ROOT/run.pid"
+[ -f "$RUN_ROOT/run.pid" ] && ps -fp "$(cat "$RUN_ROOT/run.pid")"
+ps -ef | rg -i 'kilroy attractor (run|resume)' | rg -v rg
+```
+
+## Debug Parallel Fan-In Stalls
+
+To diagnose fan-in waits, inspect branch-local progress under `parallel/<join-node>/`:
+
+```bash
+find "$RUN_ROOT/parallel" -maxdepth 3 -type f -name 'progress.ndjson' | sort
+```
+
+To inspect branch outcomes and status-contract behavior:
+
+```bash
+rg -n 'status_contract|stage_attempt_end|stage_retry_blocked|deterministic_failure_cycle_check|subgraph_deterministic_failure_cycle_check' \
+  "$RUN_ROOT"/parallel/*/*/progress.ndjson
+```
+
+To interpret heartbeat-only behavior:
+
+- If events are mostly `branch_heartbeat` and `branch_idle_ms` rises monotonically, the branch is likely waiting/stalled rather than converging.
+- If `branch_progress` continues with new `stage_attempt_*` events, the branch is still making progress.
+
+```bash
+tail -n 200 "$RUN_ROOT/progress.ndjson" | rg 'branch_heartbeat|branch_progress|branch_idle_ms'
+```
+
+## Check Loop and Cycle Guardrails
+
+To distinguish policy stops from compute hangs, inspect guardrail events directly:
+
+```bash
+rg -n 'stuck_cycle_breaker|deterministic_failure_cycle_breaker|stage_retry_blocked|deterministic_failure_cycle_check' \
+  "$RUN_ROOT/progress.ndjson"
+```
+
+Interpretation guidance:
+
+- `stuck_cycle_breaker` with `visit_count`/`visit_limit` indicates a configured loop-visit stop.
+- `*_cycle_breaker` indicates repeated deterministic failures reached the configured signature limit.
+
 ## Identify Models and Providers
 
-Use both static and runtime evidence:
+To identify models/providers accurately, combine static and runtime evidence:
 
 1. Static routing from graph `model_stylesheet` and node classes.
 2. Runtime events from `progress.ndjson` (`llm_retry`, `llm_call_*`, provider/model fields).
@@ -110,10 +185,10 @@ sed -n '1,220p' "$RUN_ROOT/run_config.json"
 
 ## Triage Common Failures
 
-- `missing status.json`: codergen node did not emit required status signal.
-- `llm retry` with `429`/rate-limit: provider quota or backoff pressure.
-- `deterministic_failure_cycle_check`: repeated deterministic failure at same node.
-- Toolchain/setup errors: check `setup_command_*` events and stage `stderr.log`.
+- To diagnose `missing status.json`, check whether the codergen node emitted the required status signal.
+- To diagnose `llm retry` with `429`/rate-limit, check for provider quota or backoff pressure.
+- To diagnose `deterministic_failure_cycle_check`, check for repeated deterministic failure at the same node.
+- To diagnose toolchain/setup errors, inspect `setup_command_*` events and stage `stderr.log`.
 
 ```bash
 rg -n 'missing status.json|llm_retry|deterministic_failure_cycle_check|setup_command_|failure_reason' "$RUN_ROOT/progress.ndjson"
@@ -121,7 +196,7 @@ rg -n 'missing status.json|llm_retry|deterministic_failure_cycle_check|setup_com
 
 ## Report Format
 
-Return findings in this order:
+To present findings clearly, report in this order:
 
 1. `run_id`, `run_root`, started time.
 2. Current node/state and whether run is still active.
