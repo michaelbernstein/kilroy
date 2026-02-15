@@ -349,16 +349,19 @@ digraph G {
   a [shape=box, llm_provider=%s, llm_model=%s, prompt="hi"]
   start -> a -> exit
 }
-`, tc.provider, tc.model))
+	`, tc.provider, tc.model))
 			cfg := &RunConfigFile{Version: 1}
 			cfg.Repo.Path = repo
 			cfg.CXDB.BinaryAddr = cxdbSrv.BinaryAddr()
 			cfg.CXDB.HTTPBaseURL = cxdbSrv.URL()
 			cfg.ModelDB.OpenRouterModelInfoPath = catalogPath
 			cfg.ModelDB.OpenRouterModelInfoUpdatePolicy = "pinned"
+			zeroRetries := 0
+			cfg.RuntimePolicy.MaxLLMRetries = &zeroRetries
 			cfg.LLM.Providers = map[string]ProviderConfig{
 				tc.provider: {
-					Backend: BackendAPI,
+					Backend:  BackendAPI,
+					Failover: []string{},
 					API: ProviderAPIConfig{
 						Protocol:      tc.protocol,
 						APIKeyEnv:     tc.keyEnv,
@@ -368,8 +371,21 @@ digraph G {
 					},
 				},
 			}
+			for _, envKey := range []string{
+				"OPENAI_API_KEY",
+				"ANTHROPIC_API_KEY",
+				"GEMINI_API_KEY",
+				"KIMI_API_KEY",
+				"ZAI_API_KEY",
+				"CEREBRAS_API_KEY",
+				"MINIMAX_API_KEY",
+			} {
+				t.Setenv(envKey, "")
+			}
 			t.Setenv(tc.keyEnv, "k-test")
-			_, err := RunWithConfig(context.Background(), dot, cfg, RunOptions{RunID: "r1-" + tc.provider, LogsRoot: t.TempDir()})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := RunWithConfig(ctx, dot, cfg, RunOptions{RunID: "r1-" + tc.provider, LogsRoot: t.TempDir()})
 			if err != nil {
 				if strings.Contains(err.Error(), "unsupported provider") {
 					t.Fatalf("provider should be accepted, got %v", err)
