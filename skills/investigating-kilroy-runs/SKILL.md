@@ -195,6 +195,7 @@ tail -n 5 "$RUN_ROOT/progress.ndjson"
 To determine whether the run is truly active at the OS level:
 
 ```bash
+pgrep -af 'kilroy attractor (run|resume)'
 [ -f "$RUN_ROOT/run.pid" ] && cat "$RUN_ROOT/run.pid"
 [ -f "$RUN_ROOT/run.pid" ] && ps -fp "$(cat "$RUN_ROOT/run.pid")"
 ps -ef | rg -i 'kilroy attractor (run|resume)' | rg -v rg
