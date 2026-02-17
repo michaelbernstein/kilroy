@@ -196,7 +196,7 @@ Once the choice/overrides are known:
 - There are many valid ways to structure a pipeline. Unless the user asks for a different structure, keep things simple and proven by using the reference profile.
 - We do:
   - Start from `skills/english-to-dotfile/reference_template.dot`.
-  - Keep the same core flow: DoD (if needed) -> plan fan-out (3) -> consolidate -> single-writer implement -> verify/check -> review fan-out (3) -> consensus -> postmortem -> planning restart.
+  - Keep the same core flow: DoD (if needed) -> plan fan-out (3) -> consolidate -> single-writer implement -> check_implement -> verify/check -> review fan-out (3) -> consensus -> postmortem -> planning restart.
   - Keep implementation single-writer. Use parallelism for thinking stages (DoD/plan/review), not for code edits.
   - Preserve explicit outcome-based routing and restart edges from the template.
 - We do not:
@@ -210,7 +210,11 @@ Once the choice/overrides are known:
 
 For iterative build workflows, keep this structure unless the user asks for a different one:
 - Graph attrs include: `default_max_retry`, `retry_target`, `fallback_retry_target`.
-- Inner repair loop: `implement -> verify -> check -> implement` on fail.
+- Inner repair loop: `implement -> check_implement -> verify -> check -> implement` on fail.
+- Route `check_implement` failures by `context.failure_class`:
+  - `outcome=fail && context.failure_class=transient_infra` -> back to `implement` with `loop_restart=true`.
+  - `outcome=fail && context.failure_class!=transient_infra` -> `postmortem` (no restart).
+- Do not set `allow_partial=true` on the primary single-writer `implement` node in this hill-climbing profile.
 - Outer improvement loop: `review_consensus -> postmortem -> plan_*` with `loop_restart=true`.
 - Routing stays outcome-based (`outcome=success|retry|fail|skip|done` and custom values where needed).
 - For any `goal_gate=true` node that can route to terminal, the terminal success route must use `condition="outcome=success"` or `condition="outcome=partial_success"`.
@@ -485,6 +489,12 @@ check_X -> impl_X  [condition="outcome=fail", label="retry"]
 
 For build pipelines, no exceptions: every implementation node (including `impl_setup`) must be followed by verify/check. `expand_spec` is the only build-pipeline node that may skip verification (use `auto_status=true` instead). Non-build workflows may use the relaxed 2-node pattern documented below.
 
+For the primary single-writer implementation node in the reference hill-climbing template, insert a `check_implement` diamond before deterministic verify gates:
+- `implement -> check_implement`
+- `check_implement -> verify_fmt [condition="outcome=success"]`
+- `check_implement -> implement [condition="outcome=fail && context.failure_class=transient_infra", loop_restart=true]`
+- `check_implement -> postmortem [condition="outcome=fail && context.failure_class!=transient_infra"]`
+
 #### Turn budget (`max_agent_turns`)
 
 **Do not add `max_agent_turns` by default.** The reference template omits turn limits, relying on `timeout` as the primary safety guard. Add turn limits only with clear production evidence (e.g., a node consistently running away or finishing well under budget).
@@ -750,7 +760,7 @@ Acceptance:
 - `[TEST_COMMAND]` must pass
 
 Write status JSON to `$KILROY_STAGE_STATUS_PATH` (absolute path). If unavailable, use `$KILROY_STAGE_STATUS_FALLBACK_PATH`. Do not write status.json in nested module directories after `cd`.
-Write status JSON: outcome=success if all criteria pass, outcome=fail with failure_reason and details otherwise.
+Write status JSON: outcome=success if all criteria pass, outcome=fail with failure_reason, failure_class, failure_signature, and details otherwise.
 ```
 
 Verification prompt template:
@@ -920,7 +930,7 @@ Common repairs (use validator output; do not guess blindly):
 | `goal_gate` | `true` = node must succeed before pipeline can exit |
 | `retry_target` | Node ID to jump to if this goal_gate fails |
 | `fallback_retry_target` | Secondary retry target |
-| `allow_partial` | `true` = accept PARTIAL_SUCCESS when retries exhausted instead of FAIL. Use on long-running nodes where partial progress is valuable. |
+| `allow_partial` | `true` = accept PARTIAL_SUCCESS when retries exhausted instead of FAIL. Use only when a downstream gate explicitly handles partial outcomes without masking hard failures. In the reference hill-climbing template, do not set this on the primary `implement` node. |
 | `max_agent_turns` | Optional turn budget: caps LLM request-response cycles. Omitted or `0` = unlimited. This is a secondary optimization — use `timeout` as the primary guard and add turn limits only once you have production data. See "Turn budget" section. |
 | `timeout` | Duration (e.g., `"300"`, `"900s"`, `"15m"`). Applies to any node type. Bare integers are seconds. |
 | `auto_status` | `true` = auto-generate SUCCESS outcome if handler writes no status.json. Only use on `expand_spec`. |

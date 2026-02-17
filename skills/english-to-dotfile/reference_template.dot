@@ -113,10 +113,10 @@ digraph reference_template {
     implement [
         shape=box,
         class="hard",
-        allow_partial=true,
         max_retries=2,
-        prompt="Goal: $goal\n\nExecute .ai/plan_final.md. Read .ai/definition_of_done.md for acceptance criteria.\nIf .ai/postmortem_latest.md exists, prioritize fixing those issues.\n\nUse progressive compilation: get each module compiling before starting the next.\nLog progress to .ai/implementation_log.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH.\noutcome=success if build passes, outcome=fail with failure_reason otherwise."
+        prompt="Goal: $goal\n\nExecute .ai/plan_final.md. Read .ai/definition_of_done.md for acceptance criteria.\nIf .ai/postmortem_latest.md exists, prioritize fixing those issues.\n\nUse progressive compilation: get each module compiling before starting the next.\nLog progress to .ai/implementation_log.md.\n\nWrite status JSON to $KILROY_STAGE_STATUS_PATH.\noutcome=success if build passes, outcome=fail with failure_reason, failure_class, and failure_signature otherwise."
     ]
+    check_implement [shape=diamond, label="Implement OK?"]
 
     // =========================================================================
     // Deterministic verification gates — tool nodes first, then semantic review
@@ -220,7 +220,11 @@ digraph reference_template {
     debate_consolidate -> implement
 
     // Verify/check inner loop (tool gates first, semantic review last)
-    implement -> verify_fmt -> check_fmt
+    implement -> check_implement
+    check_implement -> verify_fmt [condition="outcome=success"]
+    check_implement -> implement  [condition="outcome=fail && context.failure_class=transient_infra", loop_restart=true]
+    check_implement -> postmortem [condition="outcome=fail && context.failure_class!=transient_infra"]
+    verify_fmt -> check_fmt
     check_fmt -> verify_build [condition="outcome=success"]
     check_fmt -> implement    [condition="outcome=fail && context.failure_class=transient_infra", loop_restart=true]
     check_fmt -> postmortem   [condition="outcome=fail && context.failure_class!=transient_infra"]
