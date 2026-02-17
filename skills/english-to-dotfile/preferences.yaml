@@ -1,8 +1,8 @@
 # ==========================================================================
-# Pipeline Model & Executor Preferences
+# Pipeline Model Preferences
 # ==========================================================================
 #
-# This file controls model and executor defaults for the english-to-dotfile
+# This file controls model defaults for the english-to-dotfile
 # skill when generating .dot pipeline files.
 #
 # The skill reads this file at the start of model selection.
@@ -35,23 +35,3 @@ defaults:
     hard: ""
     verify: ""
     review: ""
-
-# --------------------------------------------------------------------------
-# Executor preference
-# --------------------------------------------------------------------------
-#
-# Whether pipeline nodes should execute via CLI agents or direct API calls.
-# This is a single global setting — individual providers handle it via their
-# own CLI binaries (codex for OpenAI, claude for Anthropic, gemini for Google).
-#
-# Supported values: "cli" or "api"
-#
-# "cli" means the Attractor engine invokes a CLI agent (codex, claude, etc.)
-# that manages its own tool use, file I/O, and retries.
-#
-# "api" means the engine calls the provider's HTTP API directly and manages
-# tool use itself.
-#
-# The skill falls back to API if the preferred CLI binary isn't installed.
-
-executor: "cli"

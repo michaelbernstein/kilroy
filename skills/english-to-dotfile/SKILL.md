@@ -1,6 +1,6 @@
 ---
 name: english-to-dotfile
-description: Use when turning English requirements into a runnable Kilroy Attractor DOT pipeline for `kilroy attractor ingest`, including safe defaults for model/executor selection and validator-clean routing.
+description: Use when turning English requirements into a runnable Kilroy Attractor DOT pipeline for `kilroy attractor ingest`, including safe defaults for model/provider selection and validator-clean routing.
 ---
 
 # English to Dotfile
@@ -23,7 +23,7 @@ Primary references for behavior:
 Use this skill when:
 - The user wants a DOT pipeline from plain English requirements.
 - The output target is `kilroy attractor ingest` or `kilroy attractor run`.
-- You need to choose models/executors and routing structure safely.
+- You need to choose models/providers and routing structure safely.
 
 Do not use this skill when:
 - The user asked you to implement software directly instead of generating a DOT graph.
@@ -60,7 +60,7 @@ Determine mode first:
 Extract hard constraints from user text:
 - Required providers/models
 - Parallelism intent (`no fanout`, `3-way`, `consensus`)
-- Executor intent (`cli` vs `api`)
+- Runtime backend constraints (for example CLI-only/API-only), applied via run config alignment rather than DOT structure
 - Cost/quality intent (`fast`, `max thinking`, etc.)
 
 ### Phase 1: Resolve Ambiguity with Repo Evidence
@@ -105,7 +105,7 @@ Guardrails:
 - Do not add `max_agent_turns` by default.
 - Do not add visit-count loop breakers by default.
 
-### Phase 3: Select Models and Executors
+### Phase 3: Select Models and Runtime Alignment
 
 #### 3.1 Read Preferences Defaults
 
@@ -115,13 +115,12 @@ Load preferences in this order:
 
 Use values as defaults only:
 - `defaults.models.default|hard|verify|review`
-- `executor` (`cli` or `api`)
 
 #### 3.2 Detect What Is Executable
 
-For each provider, determine usable execution paths:
-- OpenAI, Anthropic, Google/Gemini: API and/or CLI.
-- Kimi, Zai, Minimax, Cerebras: API availability.
+For each provider, determine viable runtime paths for the current project:
+- Prefer evidence from run config (`llm.providers.*.backend`, `llm.cli_profile`) when available.
+- If no run config is available, keep DOT backend-agnostic and only ensure provider/model choices are plausible.
 - Include providers configured in run config.
 
 Do not select providers that are not executable in the current environment.
@@ -155,6 +154,7 @@ Programmatic mode:
 Encoding rule:
 - Put model/provider assignments in `model_stylesheet`.
 - If high mode uses fan-out, assign distinct providers to `branch-a`, `branch-b`, `branch-c` when possible.
+- Do not encode backend routing (`cli` vs `api`) in DOT topology; backend selection belongs to run config/runtime.
 
 ### Phase 4: Write Node Prompts and File Handoffs
 
@@ -330,11 +330,12 @@ Custom outcomes are allowed if prompts define them explicitly and edges route wi
 37. **Unconditional failure edges from `check_*` nodes in iterative workflows.** Keep explicit failure-class-conditioned routes.
 38. **Ignoring explicit no-fanout constraints.** If user requests no fanout/single-path, do not emit branch families/fan-in nodes.
 39. **Interactive option prompts in programmatic mode.** In `kilroy attractor ingest` and other non-interactive generation, do not ask for low/medium/high; default to medium and output DOT.
+40. **Encoding executor/backend strategy in DOT.** Do not alter graph topology or attributes to force CLI vs API execution; backend policy lives in run config (`llm.providers.*.backend`, `llm.cli_profile`).
 
 ## Final Pre-Emit Checklist
 
 - DOT output only (programmatic).
-- User constraints applied (`no fanout`, provider/executor requirements).
+- User constraints applied (`no fanout`, provider/model requirements; backend notes aligned with run config when available).
 - `model_stylesheet` resolved with concrete providers/models.
 - All codergen prompts include full status contract.
 - File handoffs are closed (no dangling reads).
