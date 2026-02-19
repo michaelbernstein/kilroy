@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/danshapiro/kilroy/internal/cxdb"
@@ -54,7 +53,7 @@ func (p *startedProcess) terminate(grace time.Duration) error {
 		if p.cmd == nil || p.cmd.Process == nil {
 			return
 		}
-		if err := killProcessGroup(p.cmd, syscall.SIGTERM); err != nil {
+		if err := terminateProcessGroup(p.cmd); err != nil {
 			p.terminateErr = err
 			return
 		}
@@ -66,7 +65,7 @@ func (p *startedProcess) terminate(grace time.Duration) error {
 			return
 		case <-time.After(grace):
 		}
-		if err := killProcessGroup(p.cmd, syscall.SIGKILL); err != nil {
+		if err := forceKillProcessGroup(p.cmd); err != nil {
 			p.terminateErr = err
 			return
 		}
@@ -364,7 +363,7 @@ func startBackgroundCommand(parts []string, logPath string, extraEnv []string) (
 	}
 	cmd := exec.Command(parts[0], parts[1:]...)
 	cmd.Env = append(os.Environ(), extraEnv...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroupAttr(cmd)
 
 	var logFile *os.File
 	if strings.TrimSpace(logPath) != "" {

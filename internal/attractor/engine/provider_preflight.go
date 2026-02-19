@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/danshapiro/kilroy/internal/attractor/model"
@@ -1500,7 +1499,7 @@ func runProviderProbeWithOptions(ctx context.Context, exePath string, argv []str
 	if strings.TrimSpace(opts.Dir) != "" {
 		cmd.Dir = opts.Dir
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroupAttr(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -1512,13 +1511,13 @@ func runProviderProbeWithOptions(ctx context.Context, exePath string, argv []str
 	go func() { waitCh <- cmd.Wait() }()
 
 	cleanup := func() {
-		_ = killProcessGroup(cmd, syscall.SIGTERM)
+		_ = terminateProcessGroup(cmd)
 		select {
 		case <-waitCh:
 			return
 		case <-time.After(250 * time.Millisecond):
 		}
-		_ = killProcessGroup(cmd, syscall.SIGKILL)
+		_ = forceKillProcessGroup(cmd)
 		select {
 		case <-waitCh:
 		case <-time.After(2 * time.Second):

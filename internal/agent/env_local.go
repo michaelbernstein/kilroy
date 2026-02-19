@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -270,7 +269,7 @@ func (e *LocalExecutionEnvironment) ExecCommand(ctx context.Context, command str
 	start := time.Now()
 	cmd := exec.Command("bash", "-lc", command)
 	cmd.Dir = dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setSysProcAttr(cmd)
 	mergedEnv := map[string]string{}
 	for k, v := range e.BaseEnv {
 		mergedEnv[k] = v
@@ -348,20 +347,6 @@ func (e *LocalExecutionEnvironment) resolve(path string) string {
 		return p
 	}
 	return filepath.Join(e.RootDir, p)
-}
-
-func terminateProcessGroup(pid int) {
-	if pid <= 0 {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-}
-
-func killProcessGroup(pid int) {
-	if pid <= 0 {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 func filteredEnv(extra map[string]string, stripKeys []string) []string {

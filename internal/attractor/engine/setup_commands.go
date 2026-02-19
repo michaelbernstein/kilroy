@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -41,9 +40,9 @@ func (e *Engine) executeSetupCommands(ctx context.Context) error {
 		cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
 		cmd.Dir = e.WorktreeDir
 		// Run in its own process group so we can kill the entire tree on timeout.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		setProcessGroupAttr(cmd)
 		cmd.Cancel = func() error {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return forceKillPIDTree(cmd.Process.Pid)
 		}
 		cmd.WaitDelay = 3 * time.Second
 		var stdout, stderr bytes.Buffer

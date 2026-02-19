@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 var detachedExecCommand = exec.Command
@@ -32,7 +31,7 @@ func launchDetached(args []string, logsRoot string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = outFile
 	cmd.Stderr = outFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	setDetachAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}

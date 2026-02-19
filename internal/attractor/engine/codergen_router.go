@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/danshapiro/kilroy/internal/agent"
@@ -211,7 +210,14 @@ func (r *CodergenRouter) runAPI(ctx context.Context, execCtx *Execution, node *m
 		})
 		return text, nil, nil
 	case "agent_loop":
-		overrides := buildAgentLoopOverrides(execCtx.WorktreeDir, contract.EnvVars)
+		stageEnv := map[string]string{}
+		for k, v := range contract.EnvVars {
+			stageEnv[k] = v
+		}
+		for k, v := range buildStageRuntimeEnv(execCtx, node.ID) {
+			stageEnv[k] = v
+		}
+		overrides := buildAgentLoopOverrides(execCtx.WorktreeDir, stageEnv)
 		env := agent.NewLocalExecutionEnvironmentWithPolicy(execCtx.WorktreeDir, overrides, []string{"CLAUDECODE"})
 		text, used, err := r.withFailoverText(ctx, execCtx, node, client, provider, modelID, func(prov string, mid string) (string, error) {
 			var profile agent.ProviderProfile
@@ -876,6 +882,13 @@ func profileForProvider(provider string, modelID string) (agent.ProviderProfile,
 func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *model.Node, provider string, modelID string, prompt string) (string, *runtime.Outcome, error) {
 	stageDir := filepath.Join(execCtx.LogsRoot, node.ID)
 	contract := buildStageStatusContract(execCtx.WorktreeDir)
+	stageEnv := map[string]string{}
+	for k, v := range contract.EnvVars {
+		stageEnv[k] = v
+	}
+	for k, v := range buildStageRuntimeEnv(execCtx, node.ID) {
+		stageEnv[k] = v
+	}
 	providerKey := normalizeProviderKey(provider)
 	stderrPath := filepath.Join(stageDir, "stderr.log")
 	readStderr := func() string {
@@ -1017,11 +1030,11 @@ func (r *CodergenRouter) runCLI(ctx context.Context, execCtx *Execution, node *m
 		cmd := exec.CommandContext(runCtx, exe, args...)
 		cmd.Dir = execCtx.WorktreeDir
 		if codexSemantics {
-			cmd.Env = mergeEnvWithOverrides(isolatedEnv, contract.EnvVars)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Env = mergeEnvWithOverrides(isolatedEnv, stageEnv)
+			setProcessGroupAttr(cmd)
 		} else {
 			scrubbed := scrubConflictingProviderEnvKeys(baseEnv, providerKey)
-			cmd.Env = mergeEnvWithOverrides(scrubbed, contract.EnvVars)
+			cmd.Env = mergeEnvWithOverrides(scrubbed, stageEnv)
 		}
 		if promptMode == "stdin" {
 			cmd.Stdin = strings.NewReader(prompt)
@@ -1625,7 +1638,7 @@ func waitWithIdleWatchdog(ctx context.Context, cmd *exec.Cmd, stdoutPath, stderr
 	const pollInterval = 250 * time.Millisecond
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	ownsProcessGroup := cmd != nil && cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid
+	ownsProcessGroup := hasProcessGroupAttr(cmd)
 
 	lastActivity := time.Now()
 	lastStdoutSize, _ := fileSize(stdoutPath)
@@ -1647,7 +1660,7 @@ func waitWithIdleWatchdog(ctx context.Context, cmd *exec.Cmd, stdoutPath, stderr
 			}
 			timeoutErr := fmt.Errorf("codex idle timeout after %s with no output", idleTimeout)
 			if ownsProcessGroup {
-				if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
+				if err := terminateProcessGroup(cmd); err != nil {
 					return timeoutErr, true, err
 				}
 			}
@@ -1659,7 +1672,7 @@ func waitWithIdleWatchdog(ctx context.Context, cmd *exec.Cmd, stdoutPath, stderr
 				}
 			}
 			if ownsProcessGroup {
-				if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
+				if err := forceKillProcessGroup(cmd); err != nil {
 					return timeoutErr, true, err
 				}
 			}
@@ -1671,7 +1684,7 @@ func waitWithIdleWatchdog(ctx context.Context, cmd *exec.Cmd, stdoutPath, stderr
 			}
 		case <-ctx.Done():
 			if ownsProcessGroup {
-				if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
+				if err := terminateProcessGroup(cmd); err != nil {
 					return ctx.Err(), false, err
 				}
 				if killGrace > 0 {
@@ -1681,7 +1694,7 @@ func waitWithIdleWatchdog(ctx context.Context, cmd *exec.Cmd, stdoutPath, stderr
 					case <-time.After(killGrace):
 					}
 				}
-				if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
+				if err := forceKillProcessGroup(cmd); err != nil {
 					return ctx.Err(), false, err
 				}
 				select {
@@ -1709,23 +1722,6 @@ func fileSize(path string) (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
-}
-
-func killProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		return err
-	}
-	if err := syscall.Kill(-pgid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return nil
 }
 
 func emitCXDBToolTurns(ctx context.Context, eng *Engine, nodeID string, ev agent.SessionEvent) {
