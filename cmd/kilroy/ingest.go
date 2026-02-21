@@ -209,10 +209,11 @@ func moduleCacheCandidateRootsForInstalledBinary() []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, 4)
 	add := func(root string) {
-		root = filepath.Clean(strings.TrimSpace(root))
+		root = strings.TrimSpace(root)
 		if root == "" || seen[root] {
 			return
 		}
+		root = filepath.Clean(root)
 		seen[root] = true
 		out = append(out, root)
 	}
@@ -228,10 +229,17 @@ func moduleCacheCandidateRootsForInstalledBinary() []string {
 		sort.Slice(matches, func(i, j int) bool {
 			iInfo, iErr := os.Stat(matches[i])
 			jInfo, jErr := os.Stat(matches[j])
-			if iErr == nil && jErr == nil {
-				if !iInfo.ModTime().Equal(jInfo.ModTime()) {
-					return iInfo.ModTime().After(jInfo.ModTime())
-				}
+			if iErr != nil && jErr != nil {
+				return matches[i] > matches[j]
+			}
+			if iErr != nil {
+				return false // push stat-failed entries to end
+			}
+			if jErr != nil {
+				return true
+			}
+			if !iInfo.ModTime().Equal(jInfo.ModTime()) {
+				return iInfo.ModTime().After(jInfo.ModTime())
 			}
 			return matches[i] > matches[j]
 		})
