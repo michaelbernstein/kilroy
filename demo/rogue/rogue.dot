@@ -64,6 +64,11 @@ digraph rogue_pipeline {
     ]
     check_implement [shape=diamond, label="Implement OK?"]
 
+    fix_fmt [
+        shape=parallelogram,
+        max_retries=0,
+        tool_command="cd demo/rogue/rogue-wasm && cargo fmt"
+    ]
     verify_fmt [
         shape=parallelogram,
         tool_command="cd demo/rogue/rogue-wasm && cargo fmt --check"
@@ -129,7 +134,7 @@ digraph rogue_pipeline {
 
     postmortem [
         shape=box,
-        prompt="Goal: $goal\n\nAnalyze latest failure and define the next repair iteration.\nRead: .ai/review_consensus.md and .ai/implementation_log.md.\nRead: .ai/definition_of_done.md to cross-reference which acceptance criteria failed.\nIf review fanout artifacts are needed, read $KILROY_LOGS_ROOT/review_fanout/parallel_results.json and corresponding <worktree_dir>/.ai/review_a.md, .ai/review_b.md, .ai/review_c.md.\nWrite: .ai/postmortem_latest.md.\n\nOutput must include:\n- Root cause: which specific AC (AC-1 through AC-14) failed and why.\n- What worked: preserve all passing game systems and tests.\n- What failed: specific code/test gaps with file paths.\n- Next changes: concrete repair actions (do not reset successful work).\n- Priority order: fix build-blocking issues first, then test failures, then fidelity gaps.\n\nStatus contract:\n- Write canonical status JSON to $KILROY_STAGE_STATUS_PATH.\n- If unavailable, write the same JSON to $KILROY_STAGE_STATUS_FALLBACK_PATH.\n- Use schema {\"status\":\"...\"}.\n- Do not write nested status.json files after cd.\n- For status=fail or status=retry include failure_reason and details.\n- Include failure_class when classifying deterministic vs transient failures.\n\nSet status=success when .ai/postmortem_latest.md is written."
+        prompt="Goal: $goal\n\nAnalyze latest failure and define the next repair iteration.\nRead: .ai/review_consensus.md and .ai/implementation_log.md.\nRead: .ai/definition_of_done.md to cross-reference which acceptance criteria failed.\nIf review fanout artifacts are needed, read $KILROY_LOGS_ROOT/review_fanout/parallel_results.json and corresponding <worktree_dir>/.ai/review_a.md, .ai/review_b.md, .ai/review_c.md.\nWrite: .ai/postmortem_latest.md.\n\nOutput must include:\n- Root cause: which specific AC (AC-1 through AC-14) failed and why.\n- What worked: preserve all passing game systems and tests.\n- What failed: specific code/test gaps with file paths.\n- Next changes: concrete repair actions (do not reset successful work).\n- Priority order: fix build-blocking issues first, then test failures, then fidelity gaps.\n\nStatus contract:\n- Write canonical status JSON to $KILROY_STAGE_STATUS_PATH.\n- If unavailable, write the same JSON to $KILROY_STAGE_STATUS_FALLBACK_PATH.\n- Use schema {\"status\":\"...\"}.\n- Do not write nested status.json files after cd.\n- For status=fail or status=retry include failure_reason and details.\n- Include failure_class when classifying deterministic vs transient failures.\n\nYour status reflects whether you completed the analysis, not the state of the implementation.\nSet status=success when .ai/postmortem_latest.md is written."
     ]
 
     // =========================================================================
@@ -159,7 +164,8 @@ digraph rogue_pipeline {
 
     // Implement -> deterministic verify chain
     implement -> check_implement
-    check_implement -> verify_fmt [condition="outcome=success"]
+    check_implement -> fix_fmt [condition="outcome=success"]
+    fix_fmt -> verify_fmt
     check_implement -> implement [condition="outcome=fail && context.failure_class=transient_infra", loop_restart=true]
     check_implement -> postmortem [condition="outcome=fail && context.failure_class!=transient_infra"]
     check_implement -> postmortem
@@ -216,5 +222,5 @@ digraph rogue_pipeline {
     review_consensus -> postmortem
 
     // Hill-climbing loop: postmortem -> toolchain check -> re-plan -> re-implement
-    postmortem -> check_toolchain [loop_restart=true]
+    postmortem -> check_toolchain
 }
