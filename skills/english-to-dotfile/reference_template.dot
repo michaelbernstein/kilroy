@@ -116,8 +116,12 @@ digraph reference_template {
         check_implement [shape=diamond, label="Implement OK?"]
 
         // Deterministic verification gates - tool nodes first, then semantic review
+        // max_retries=0: format checks are deterministic — re-running on unchanged
+        // code always produces the same result. Route to postmortem immediately
+        // rather than wasting retries.
         verify_fmt [
             shape=parallelogram,
+            max_retries=0,
             tool_command="echo 'Replace with project-specific formatter check'; exit 0"
         ]
         check_fmt [shape=diamond, label="Fmt OK?"]
@@ -134,8 +138,10 @@ digraph reference_template {
         ]
         check_test [shape=diamond, label="Tests OK?"]
 
+        // max_retries=0: artifact hygiene checks are deterministic.
         verify_artifacts [
             shape=parallelogram,
+            max_retries=0,
             tool_command="echo 'Replace with artifact hygiene check (include both .cargo-target* and .cargo_target* patterns)'; exit 0"
         ]
         check_artifacts [shape=diamond, label="Artifacts OK?"]
