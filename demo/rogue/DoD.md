@@ -134,7 +134,7 @@ Score file encryption, wizard password authentication (replaced by simpler brows
 3. BEFORE/AFTER execution order matches the `spread()` formula.
 4. Hunger system: `HUNGERTIME=1300`, `STARVETIME=850`, `STOMACHSIZE=2000`.
 5. Healing daemon: quiet >= 3 turns triggers healing.
-6. Wandering monster timer: `WANDERTIME=70` turns between spawn events.
+6. Wandering monster timer: `WANDERTIME=spread(70)` — randomized interval of 67-73 turns between spawn events (using the `spread()` formula: `nm - nm/20 + rnd(nm/10)`).
 
 ### AC-11: Save and Load
 
@@ -179,7 +179,7 @@ These tests drive the game engine programmatically with a fixed seed, executing 
 Set a fixed seed. Initialize a new game. Verify:
 1. Player starts at `@` on level 1, in a lit room.
 2. Player has starting equipment (mace, ring mail, bow, arrows, food).
-3. Status line shows Level:1, HP:12(12), Str:16(16), Gold:0, Arm:5, Exp:1/0.
+3. Status line shows Level:1, HP:12(12), Str:16(16), Gold:0, Arm:4, Exp:1/0.
 4. Execute 10 movement commands (e.g., `h`, `l`, `j`, `k` sequence). After each, verify player position changed and is on a walkable tile (floor, door, or corridor).
 5. The dungeon contains at least 1 room with floor tiles, at least 1 corridor, and at least 1 staircase.
 
@@ -300,8 +300,8 @@ grep -qi 'monospace\|courier\|mono' demo/rogue/rogue-wasm/www/index.html
 # 6. 80x24 grid reference
 grep -qE '80.?x.?24|NUMCOLS.*80|cols.*80|width.*80' demo/rogue/rogue-wasm/www/index.html
 
-# 7. No artifact pollution
-! git diff --name-only | grep -qE '(^|/)(target|node_modules|dist|\.cargo-target|\.cargo_target)(\/|$)'
+# 7. No artifact pollution (tracked or untracked)
+! { git diff --name-only; git ls-files --others --exclude-standard; } | grep -qE '(^|/)(target|node_modules|dist|\.cargo-target|\.cargo_target|pkg)(\/|$)'
 ```
 
 ### Required Unit Tests (in `cargo test`)
@@ -371,7 +371,7 @@ A human reviewer (or LLM reviewer with code access) must verify:
 | Unit tests | All system fidelity tests pass | `cargo test` exits 0 (18 unit tests) |
 | Integration tests | All gameplay scenario tests pass | `cargo test` exits 0 (11 integration tests) |
 | Deliverable | HTML file exists and loads | File exists, references WASM, no console errors |
-| Artifact hygiene | No build artifacts in git | `git diff` clean of target/node_modules/dist |
+| Artifact hygiene | No build artifacts in git (tracked or untracked) | `git diff` + `git ls-files --others` clean of target/node_modules/dist/pkg |
 | Security | No `unsafe` without justification | Code review: each `unsafe` block has a comment |
 | Performance | Game runs at interactive speed | Subjective: no visible lag on keystroke in modern browser |
 

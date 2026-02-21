@@ -27,9 +27,8 @@ digraph rogue_pipeline {
     check_toolchain_result [shape=diamond, label="Toolchain OK?"]
 
     seed_spec_and_dod [
-        shape=box,
-        auto_status=true,
-        prompt="Goal: $goal\n\nSeed .ai/spec.md and .ai/definition_of_done.md from the authoritative repo files.\n\nStep 1: Read demo/rogue/spec.md. Copy its content verbatim to .ai/spec.md. Do not summarize, rewrite, or alter the content — copy it exactly.\n\nStep 2: Read demo/rogue/DoD.md. Copy its content verbatim to .ai/definition_of_done.md. Do not summarize, rewrite, or alter the content — copy it exactly.\n\nStep 3: Verify both files were written by reading them back.\n\nThese files are the authoritative specification and Definition of Done for this project. All downstream nodes will read from .ai/spec.md and .ai/definition_of_done.md.\n\nStatus contract:\n- Write canonical status JSON to $KILROY_STAGE_STATUS_PATH.\n- If unavailable, write the same JSON to $KILROY_STAGE_STATUS_FALLBACK_PATH.\n- Use schema {\"status\":\"...\"}.\n- Do not write nested status.json files after cd.\n- For status=fail or status=retry include failure_reason and details.\n- Include failure_class when classifying deterministic vs transient failures.\n\nSet status=success when both .ai/spec.md and .ai/definition_of_done.md are written; otherwise set status=fail."
+        shape=parallelogram,
+        tool_command="mkdir -p .ai && cp demo/rogue/spec.md .ai/spec.md && cp demo/rogue/DoD.md .ai/definition_of_done.md && test -s .ai/spec.md && test -s .ai/definition_of_done.md"
     ]
 
     plan_fanout [shape=component, label="Plan Fan-Out"]
@@ -91,7 +90,7 @@ digraph rogue_pipeline {
 
     verify_artifacts [
         shape=parallelogram,
-        tool_command="if git diff --name-only | grep -qE '(^|/)(target|node_modules|dist|\\.cargo-target|\\.cargo_target)(/|$)'; then echo artifact_paths_detected; exit 1; else exit 0; fi"
+        tool_command="if { git diff --name-only; git ls-files --others --exclude-standard; } | grep -qE '(^|/)(target|node_modules|dist|\\.cargo-target|\\.cargo_target|pkg)(/|$)'; then echo artifact_paths_detected; exit 1; else exit 0; fi"
     ]
     check_artifacts [shape=diamond, label="Artifacts OK?"]
 
