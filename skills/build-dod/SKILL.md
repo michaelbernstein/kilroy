@@ -17,7 +17,8 @@ Every acceptance criterion is paired with a verification step that catches the s
 2. List deliverables — the artifacts that exist when done
 3. Write acceptance criteria — one observable assertion per row
 4. Pair each AC with a verification step that tests the delivered artifact
-5. Crosscheck — confirm each verification would catch its AC being violated
+5. Write integration test scenarios that exercise the system end-to-end
+6. Crosscheck — confirm each verification would catch its AC being violated
 
 ## Acceptance Criteria
 
@@ -43,6 +44,19 @@ Group by concern (e.g. Build, Output, Behavior, Integration). Number hierarchica
 - The question to answer
 - The expected answer
 - The evidence to examine (file paths, commands, artifacts)
+
+## Integration Test Scenarios
+
+Individual ACs verify parts in isolation. Integration test scenarios prove the system works as a whole by exercising multi-step user journeys.
+
+For each primary way the deliverable is used, write a scenario with:
+- **Starting state** — deterministic inputs (fixed seed, known data, clean environment)
+- **Actions** — a sequence of operations a real user or consumer would perform
+- **Expected outcomes** — observable results after each action
+
+Scenarios should cross multiple AC groups. A browser app scenario might cover loading (AC-2), display (AC-3), input (AC-4), and state persistence (AC-11) in one flow. A library scenario might cover import, configuration, processing, and output in one sequence.
+
+Each scenario becomes a named automated test in the DoD, with `test exits 0` as its verification.
 
 ## The Crosscheck
 
@@ -81,4 +95,10 @@ After writing all AC/verification pairs, review each row:
 | ID | Criterion | Verification |
 |----|-----------|--------------|
 | AC-N.M | [Observable assertion] | `command` or semantic: Q → A via [evidence] |
+
+## Integration Test Scenarios
+
+| ID | Scenario | Steps | Verification |
+|----|----------|-------|--------------|
+| IT-N | [User journey name] | 1. [action] → [expected] 2. [action] → [expected] ... | `test command` exits 0 |
 ```
